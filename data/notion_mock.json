@@ -1,0 +1,72 @@
+[
+  {
+    "id": "NOTION-1",
+    "title": "Project X: Q3 Architecture & Milestone Roadmap",
+    "content": "In Q3, Project X underwent a major architectural evolution. We successfully transitioned from a monolithic backend to a modular microservices architecture. Key milestones include launching the GraphQL gateway for consolidated data access, implementing WebSocket real-time updates for live dashboards, and decoupling the notification subsystem. Key decision: standardizing on Anthropic Claude 3.5 Sonnet for natural language processing.",
+    "last_edited": "2026-09-20T14:30:00Z",
+    "url": "https://notion.so/workspace/Project-X-Q3-Architecture-Roadmap-1"
+  },
+  {
+    "id": "NOTION-2",
+    "title": "Project X: Executive Status Update (Q3)",
+    "content": "Quarterly summary for Project X: The team achieved 80% of Q3 objectives. Highlights include: complete UI redesign with modern dark aesthetics, enterprise SSO refactoring, and database schema migration for scaling to 1M daily active users. Main bottleneck: third-party API rate limits and compliance sign-offs.",
+    "last_edited": "2026-09-22T09:15:00Z",
+    "url": "https://notion.so/workspace/Project-X-Executive-Status-Update-Q3-2"
+  },
+  {
+    "id": "NOTION-3",
+    "title": "Project X: Launch Risk & Compliance Alignment Meeting (Sept 18, 2026)",
+    "content": "Meeting Notes - Launch Risk Review:\n1. SOC2 Audit Logs: High risk item. Required audit logging for administrative mutations is currently behind schedule (JIRA-106). Target resolution date: Sept 28.\n2. Payment API Rate Limits: Stripe sandbox API throttling during peak tests could delay dynamic billing launch. Mitigation: Implement local caching layer.\n3. Failover Readiness: Database read replica failover tests passed, but automated failover alert latency is 45 seconds (target < 15s).",
+    "last_edited": "2026-09-18T16:45:00Z",
+    "url": "https://notion.so/workspace/Project-X-Launch-Risk-Compliance-Meeting-3"
+  },
+  {
+    "id": "NOTION-4",
+    "title": "Project X: Memory & Context Strategy Sync",
+    "content": "Decisions on Agentic RAG architecture:\n- Use SQLite for local MVP state persistence (sessions, QA history, extracted user/project facts).\n- Vector storage (Chroma/Pinecone) will be added in Phase 2 for semantic retrieval.\n- Context truncation strategy: Keep top 5 most relevant facts per session alongside retrieved live Jira/Notion items.",
+    "last_edited": "2026-09-21T11:00:00Z",
+    "url": "https://notion.so/workspace/Project-X-Memory-Context-Strategy-4"
+  },
+  {
+    "id": "NOTION-5",
+    "title": "Project X: Security & Auth Module Specification",
+    "content": "Security Specification:\n- All API endpoints require Bearer JWT token verification.\n- OAuth2 PKCE flow for desktop and mobile clients.\n- Token revocation list maintained in Redis cache.\n- Sarah Chen leading auth migration work (JIRA-101).",
+    "last_edited": "2026-09-15T10:20:00Z",
+    "url": "https://notion.so/workspace/Project-X-Security-Auth-Spec-5"
+  },
+  {
+    "id": "NOTION-6",
+    "title": "Project X: Frontend Performance Review",
+    "content": "Frontend audit results:\n- Page load time reduced from 3.2s to 0.9s after Vite migration and code splitting.\n- Implemented virtualized list components for rendered Jira feed.\n- Added real-time WebSocket connection status badge in header.",
+    "last_edited": "2026-09-23T15:10:00Z",
+    "url": "https://notion.so/workspace/Project-X-Frontend-Performance-Review-6"
+  },
+  {
+    "id": "NOTION-7",
+    "title": "Project X: Third-Party Integrations Policy",
+    "content": "Standard operating procedure for third-party APIs:\n- Exponential backoff required for 429 Rate Limit responses.\n- Circuit breaker pattern to prevent cascading failures if Notion/Jira endpoints timeout.\n- Fallback to cached local mock data during vendor outages.",
+    "last_edited": "2026-09-12T08:00:00Z",
+    "url": "https://notion.so/workspace/Project-X-Integrations-Policy-7"
+  },
+  {
+    "id": "NOTION-8",
+    "title": "Project X: Incident Post-Mortem - Latency Spike in Search",
+    "content": "On Sept 10, search latency spiked to 4.5 seconds. Root cause: Missing composite index on (project_id, updated_at) in read replica. Resolution: Added index and increased memory allocation. Follow-up ticket created: JIRA-102 assigned to Alex Rivera.",
+    "last_edited": "2026-09-11T13:40:00Z",
+    "url": "https://notion.so/workspace/Project-X-Incident-Post-Mortem-8"
+  },
+  {
+    "id": "NOTION-9",
+    "title": "Project X: Launch Go/No-Go Checklist",
+    "content": "Launch Checklist Status (Target Launch: Oct 15):\n- Code freeze: Oct 5\n- Security Audit: In Progress (Blocked on JIRA-106 SOC2 logging)\n- Auth Migration: Blocked (JIRA-101)\n- DB Performance Tuning: Blocked (JIRA-102)\n- UI Acceptance: Passed",
+    "last_edited": "2026-09-24T17:00:00Z",
+    "url": "https://notion.so/workspace/Project-X-Go-NoGo-Checklist-9"
+  },
+  {
+    "id": "NOTION-10",
+    "title": "Project X: Product Requirement Document (PRD) - Realtime Agentic RAG",
+    "content": "PRD Overview:\nBuild an intelligent Q&A assistant that queries live operational tools (Jira, Notion) and retains conversational memory. Must decompose queries into sub-questions, synthesize responses with exact inline citations [Jira #id] / [Notion pg. id], and render transparent reasoning traces.",
+    "last_edited": "2026-09-01T09:00:00Z",
+    "url": "https://notion.so/workspace/Project-X-PRD-Agentic-RAG-10"
+  }
+]
