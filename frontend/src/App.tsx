@@ -1,4 +1,6 @@
 import { FormEvent, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 type QueryResponse = { answer: string };
 
@@ -7,7 +9,7 @@ export default function App() {
   const [answer, setAnswer] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const answerRef = useRef<HTMLParagraphElement>(null);
+  const answerRef = useRef<HTMLDivElement>(null);
 
   async function submitQuery(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -79,7 +81,19 @@ export default function App() {
             <h2 id="answer-title">Answer</h2>
             <div className={`answer-box${loading ? ' answer-pending' : ''}`}>
               {loading ? <span className="answer-placeholder">Your response will appear here.</span> : (
-                <p ref={answerRef} tabIndex={-1}>{answer}</p>
+                <div ref={answerRef} className="markdown" tabIndex={-1}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                      table: ({ node: _node, ...props }) => (
+                        <div className="table-scroll"><table {...props} /></div>
+                      ),
+                    }}
+                  >
+                    {answer}
+                  </ReactMarkdown>
+                </div>
               )}
             </div>
           </section>
