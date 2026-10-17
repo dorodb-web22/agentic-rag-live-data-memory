@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import lru_cache
 from typing import Protocol, TypedDict
@@ -5,6 +6,8 @@ from typing import Protocol, TypedDict
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+
+logger = logging.getLogger(__name__)
 
 
 class AgentError(RuntimeError):
@@ -32,6 +35,24 @@ def _message_content_to_text(content: object) -> str:
 
 
 def create_llm() -> SupportsInvoke:
+    provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+
+    if provider == "groq":
+        # Groq exposes an OpenAI-compatible API, so ChatOpenAI works with a custom base_url.
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise AgentNotConfiguredError("GROQ_API_KEY is required to call the LLM.")
+        return ChatOpenAI(
+            model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
+            api_key=api_key,
+            base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+        )
+
+    if provider != "openai":
+        raise AgentNotConfiguredError(
+            f"Unsupported LLM_PROVIDER '{provider}'. Use 'openai' or 'groq'."
+        )
+
     if not os.getenv("OPENAI_API_KEY"):
         raise AgentNotConfiguredError("OPENAI_API_KEY is required to call the LLM.")
 
@@ -61,7 +82,15 @@ class BasicAgent:
     def answer(self, query: str) -> str:
         if self._graph is None:
             self._graph = create_agent_graph()
-        result = self._graph.invoke({"query": query})
+        try:
+            result = self._graph.invoke({"query": query})
+        except AgentError:
+            raise
+        except Exception as error:
+            # Provider failures (bad key, rate limit, unknown model) become a 502
+            # instead of an unhandled 500. Only the exception type is exposed.
+            logger.exception("LLM request failed")
+            raise AgentError(f"LLM request failed ({type(error).__name__}).") from error
         if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
             raise AgentError("Agent returned an invalid response.")
         return result["answer"]
