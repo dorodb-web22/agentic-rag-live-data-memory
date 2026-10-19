@@ -20,12 +20,15 @@ def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse, response_model_exclude_none=True)
 def query_agent(
     request: QueryRequest,
     agent: BasicAgent = Depends(get_agent),
 ) -> QueryResponse:
     try:
+        if hasattr(agent, "query_with_evidence"):
+            answer, evidence = agent.query_with_evidence(request.query)
+            return QueryResponse(answer=answer, evidence=evidence)
         return QueryResponse(answer=agent.answer(request.query))
     except AgentNotConfiguredError as error:
         raise HTTPException(
