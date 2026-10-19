@@ -15,3 +15,4 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    evidence: list[dict[str, object]] | None = None

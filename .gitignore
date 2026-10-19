@@ -15,5 +15,12 @@ frontend/*.tsbuildinfo
 # Environment variables
 .env
 
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+backend/data/*.db
+
 # macOS
 .DS_Store
