@@ -18,7 +18,13 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "demo.db"
 
 
 def _run_coroutine(coro: Any) -> Any:
-    """Run an async coroutine from either sync or async execution contexts."""
+    """Run an async coroutine from either sync or async execution contexts.
+    
+    The official Model Context Protocol (MCP) SDK is built strictly async-first
+    over asyncio stdio streams. This helper provides a safe bridge for synchronous
+    execution contexts (such as standard LangGraph nodes or sync endpoint handlers)
+    without causing nested event loop conflicts.
+    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

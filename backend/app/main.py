@@ -26,10 +26,8 @@ def query_agent(
     agent: BasicAgent = Depends(get_agent),
 ) -> QueryResponse:
     try:
-        if hasattr(agent, "query_with_evidence"):
-            answer, evidence = agent.query_with_evidence(request.query)
-            return QueryResponse(answer=answer, evidence=evidence)
-        return QueryResponse(answer=agent.answer(request.query))
+        answer, evidence = agent.query_with_evidence(request.query)
+        return QueryResponse(answer=answer, evidence=evidence)
     except AgentNotConfiguredError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

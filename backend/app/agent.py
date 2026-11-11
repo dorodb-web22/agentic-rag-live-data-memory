@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from functools import lru_cache
-from typing import Any, Protocol, TypedDict
+from typing import Any, NotRequired, Protocol, TypedDict
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -16,10 +16,15 @@ logger = logging.getLogger(__name__)
 DATABASE_KEYWORDS = {
     "product", "products", "price", "prices", "cost", "costs", "package", "packages",
     "starter", "professional", "enterprise", "subscription", "subscriptions",
-    "catalog", "inventory", "database", "table", "sqlite", "tier", "tiers",
+    "catalog", "inventory", "tier", "tiers",
     "plan", "plans", "pricing", "how much", "add-on", "addon", "service", "services",
     "storage", "support",
 }
+
+DB_DIRECT_PHRASES = (
+    "in the database", "from the database", "in the table", "from the table",
+    "database records", "database table", "sqlite database", "query database",
+)
 
 STOP_WORDS = {
     "the", "a", "an", "this", "that", "each", "any", "every", "what", "which",
@@ -30,6 +35,8 @@ STOP_WORDS = {
 def is_database_query(query: str) -> bool:
     """Determine whether a natural language query targets SQLite database information."""
     lowered = query.lower()
+    if any(phrase in lowered for phrase in DB_DIRECT_PHRASES):
+        return True
     return any(keyword in lowered for keyword in DATABASE_KEYWORDS)
 
 
@@ -46,11 +53,14 @@ def build_sql_query(user_query: str) -> tuple[str, str | None]:
 
     match = re.search(r"([a-zA-Z0-9_\-]+)\s+(?:package|plan|tier|product)", lowered)
     if match and match.group(1) not in STOP_WORDS:
-        term = match.group(1)
-        return (
-            f"SELECT id, name, description, price, category FROM products WHERE LOWER(name) LIKE '%{term}%'",
-            term,
-        )
+        raw_term = match.group(1)
+        # Sanitize term to alphanumeric only to prevent wildcard or syntax issues
+        sanitized_term = re.sub(r"[^a-zA-Z0-9]", "", raw_term)
+        if sanitized_term:
+            return (
+                f"SELECT id, name, description, price, category FROM products WHERE LOWER(name) LIKE '%{sanitized_term}%'",
+                sanitized_term,
+            )
 
     return "SELECT id, name, description, price, category FROM products", None
 
@@ -71,6 +81,7 @@ class SupportsInvoke(Protocol):
 class AgentState(TypedDict):
     query: str
     answer: str
+    evidence: NotRequired[list[dict[str, Any]] | None]
 
 
 def _message_content_to_text(content: object) -> str:
@@ -113,6 +124,7 @@ def create_agent_graph(
 
     def call_llm(state: AgentState) -> AgentState:
         query = state["query"]
+        evidence: list[dict[str, Any]] | None = None
         if is_database_query(query):
             sql_query, _ = build_sql_query(query)
             try:
@@ -124,6 +136,7 @@ def create_agent_graph(
                 logger.exception("Unexpected retrieval error: %s", exc)
                 raise AgentError(f"Database retrieval error ({type(exc).__name__}).") from exc
 
+            evidence = records
             if records:
                 evidence_text = json.dumps(records, indent=2)
                 prompt = (
@@ -154,7 +167,7 @@ def create_agent_graph(
             response = model.invoke([HumanMessage(content=query)])
 
         answer = _message_content_to_text(getattr(response, "content", response))
-        return {"query": query, "answer": answer}
+        return {"query": query, "answer": answer, "evidence": evidence}
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", call_llm)
@@ -189,16 +202,7 @@ class BasicAgent:
         if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
             raise AgentError("Agent returned an invalid response.")
 
-        # If it was a database query, retrieve the matching records for evidence field
-        evidence = None
-        if is_database_query(query):
-            client = self._mcp_client or SqliteMcpClient()
-            sql, _ = build_sql_query(query)
-            try:
-                evidence = client.execute_query_sync(sql)
-            except Exception:
-                evidence = None
-
+        evidence = result.get("evidence")
         return result["answer"], evidence
 
 

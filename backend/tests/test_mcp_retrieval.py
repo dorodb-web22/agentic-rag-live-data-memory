@@ -1,4 +1,4 @@
-import os
+import os  # noqa: F401 — reserved for future env-var based integration tests
 from pathlib import Path
 from typing import Any
 
@@ -211,3 +211,31 @@ def test_api_query_returns_evidence_for_database_query(mcp_client: SqliteMcpClie
         assert data["evidence"][0]["price"] == 100.0
     finally:
         app.dependency_overrides.clear()
+
+
+def test_agent_queries_mcp_exactly_once_per_request(
+    mcp_client: SqliteMcpClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ensure evidence retrieval does not trigger duplicate MCP queries or subprocesses."""
+    fake_llm = RecordingFakeLLM(answer="The Enterprise package costs $5,000.")
+    agent = BasicAgent(
+        graph=create_agent_graph(llm=fake_llm, mcp_client=mcp_client),
+        mcp_client=mcp_client,
+    )
+
+    query_count = 0
+    orig_exec = mcp_client.execute_query_sync
+
+    def counted_execute(query: str) -> list[dict[str, Any]]:
+        nonlocal query_count
+        query_count += 1
+        return orig_exec(query)
+
+    monkeypatch.setattr(mcp_client, "execute_query_sync", counted_execute)
+
+    answer, evidence = agent.query_with_evidence("What is the price of the Enterprise package?")
+    assert query_count == 1
+    assert "Enterprise package costs $5,000" in answer
+    assert evidence is not None
+    assert len(evidence) == 1
+    assert evidence[0]["name"] == "Enterprise package"
