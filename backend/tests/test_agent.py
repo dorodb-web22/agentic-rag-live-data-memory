@@ -28,6 +28,7 @@ def test_agent_graph_invokes_llm_and_returns_answer() -> None:
     assert result == {
         "query": "What is RAG?",
         "answer": "A deterministic agent answer.",
+        "evidence": None,
     }
     assert len(llm.inputs) == 1
 
