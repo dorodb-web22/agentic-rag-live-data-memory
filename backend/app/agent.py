@@ -80,8 +80,10 @@ class SupportsInvoke(Protocol):
 
 class AgentState(TypedDict):
     query: str
-    answer: str
+    plan: NotRequired[str | None]
+    sql: NotRequired[str | None]
     evidence: NotRequired[list[dict[str, Any]] | None]
+    answer: NotRequired[str | None]
 
 
 def _message_content_to_text(content: object) -> str:
@@ -115,6 +117,84 @@ def create_llm() -> SupportsInvoke:
     return ChatOpenAI(model=model)
 
 
+def planner_node(state: AgentState) -> dict[str, Any]:
+    """Inspect the user query and decide the retrieval plan.
+
+    Returns only the keys it owns: plan and sql.
+    Does NOT call the LLM or MCP — pure routing logic.
+    """
+    query = state["query"]
+    if is_database_query(query):
+        sql, _ = build_sql_query(query)
+        return {"plan": "db", "sql": sql}
+    return {"plan": "general", "sql": None}
+
+
+def worker_node(
+    state: AgentState,
+    model: SupportsInvoke,
+    client: SqliteMcpClient,
+) -> dict[str, Any]:
+    """Execute the plan set by the planner: hit MCP if needed, call LLM, return answer."""
+    query = state["query"]
+    plan = state.get("plan", "general")
+    sql = state.get("sql")
+    evidence: list[dict[str, Any]] | None = None
+
+    if plan == "db" and sql:
+        try:
+            records = client.execute_query_sync(sql)
+        except McpClientError as exc:
+            logger.exception("MCP retrieval failed: %s", exc)
+            raise AgentError(f"MCP retrieval failed: {str(exc)}") from exc
+        except Exception as exc:
+            logger.exception("Unexpected retrieval error: %s", exc)
+            raise AgentError(f"Database retrieval error ({type(exc).__name__}).") from exc
+
+        evidence = records
+        if records:
+            evidence_text = json.dumps(records, indent=2)
+            prompt = (
+                "You are an Agentic RAG Assistant. Answer the user question based on the retrieved SQLite database records.\n\n"
+                "Database Source: SQLite (via Model Context Protocol - MCP)\n"
+                "Table: products\n"
+                f"Retrieved Records:\n{evidence_text}\n\n"
+                "Instructions:\n"
+                "1. Provide a direct, factual answer to the user question in Markdown.\n"
+                "2. Under a '### Supporting Evidence' section, display the retrieved database facts (Table, Record ID, Name, Price, Category) in a Markdown table.\n"
+                "3. Be strictly grounded in the database records provided above.\n"
+                "4. If the user question is broad or missing specific parameters (e.g., tier, plan type, or add-on specifications), clearly list what is available and ask the user for the specific missing details to narrow down their request.\n\n"
+                f"User Question: {query}"
+            )
+        else:
+            prompt = (
+                "You are an Agentic RAG Assistant. Answer the user question based on the retrieved SQLite database records.\n\n"
+                "Database Source: SQLite (via Model Context Protocol - MCP)\n"
+                "Table: products\n"
+                "Retrieved Records: No matching records found.\n\n"
+                "Instructions:\n"
+                "1. Clearly inform the user that no matching record exists in the database for the requested item.\n"
+                "2. Under a '### Supporting Evidence' section, state that the database query returned 0 records.\n"
+                "3. If the user query is ambiguous, incomplete, or might refer to an alternative item, ask clarifying questions for the specific missing information.\n"
+                "4. Do NOT invent, assume, or fabricate any prices or product details.\n\n"
+                f"User Question: {query}"
+            )
+        response = model.invoke([HumanMessage(content=prompt)])
+    else:
+        system_prompt = (
+            "You are an Agentic RAG Assistant. Provide a direct, helpful, and concise answer in Markdown. "
+            "If the user query is ambiguous, incomplete, or requires missing context or parameters, "
+            "clearly ask the user for the specific missing information."
+        )
+        response = model.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=query),
+        ])
+
+    answer = _message_content_to_text(getattr(response, "content", response))
+    return {"answer": answer, "evidence": evidence}
+
+
 def create_agent_graph(
     llm: SupportsInvoke | None = None,
     mcp_client: SqliteMcpClient | None = None,
@@ -122,67 +202,15 @@ def create_agent_graph(
     model = llm or create_llm()
     client = mcp_client or SqliteMcpClient()
 
-    def call_llm(state: AgentState) -> AgentState:
-        query = state["query"]
-        evidence: list[dict[str, Any]] | None = None
-        if is_database_query(query):
-            sql_query, _ = build_sql_query(query)
-            try:
-                records = client.execute_query_sync(sql_query)
-            except McpClientError as exc:
-                logger.exception("MCP retrieval failed: %s", exc)
-                raise AgentError(f"MCP retrieval failed: {str(exc)}") from exc
-            except Exception as exc:
-                logger.exception("Unexpected retrieval error: %s", exc)
-                raise AgentError(f"Database retrieval error ({type(exc).__name__}).") from exc
-
-            evidence = records
-            if records:
-                evidence_text = json.dumps(records, indent=2)
-                prompt = (
-                    "You are an Agentic RAG Assistant. Answer the user question based on the retrieved SQLite database records.\n\n"
-                    "Database Source: SQLite (via Model Context Protocol - MCP)\n"
-                    "Table: products\n"
-                    f"Retrieved Records:\n{evidence_text}\n\n"
-                    "Instructions:\n"
-                    "1. Provide a direct, factual answer to the user question in Markdown.\n"
-                    "2. Under a '### Supporting Evidence' section, display the retrieved database facts (Table, Record ID, Name, Price, Category) in a Markdown table.\n"
-                    "3. Be strictly grounded in the database records provided above.\n"
-                    "4. If the user question is broad or missing specific parameters (e.g., tier, plan type, or add-on specifications), clearly list what is available and ask the user for the specific missing details to narrow down their request.\n\n"
-                    f"User Question: {query}"
-                )
-            else:
-                prompt = (
-                    "You are an Agentic RAG Assistant. Answer the user question based on the retrieved SQLite database records.\n\n"
-                    "Database Source: SQLite (via Model Context Protocol - MCP)\n"
-                    "Table: products\n"
-                    "Retrieved Records: No matching records found.\n\n"
-                    "Instructions:\n"
-                    "1. Clearly inform the user that no matching record exists in the database for the requested item.\n"
-                    "2. Under a '### Supporting Evidence' section, state that the database query returned 0 records.\n"
-                    "3. If the user query is ambiguous, incomplete, or might refer to an alternative item, ask clarifying questions for the specific missing information.\n"
-                    "4. Do NOT invent, assume, or fabricate any prices or product details.\n\n"
-                    f"User Question: {query}"
-                )
-            response = model.invoke([HumanMessage(content=prompt)])
-        else:
-            system_prompt = (
-                "You are an Agentic RAG Assistant. Provide a direct, helpful, and concise answer in Markdown. "
-                "If the user query is ambiguous, incomplete, or requires missing context or parameters, "
-                "clearly ask the user for the specific missing information."
-            )
-            response = model.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=query),
-            ])
-
-        answer = _message_content_to_text(getattr(response, "content", response))
-        return {"query": query, "answer": answer, "evidence": evidence}
+    def _worker(state: AgentState) -> dict[str, Any]:
+        return worker_node(state, model, client)
 
     graph = StateGraph(AgentState)
-    graph.add_node("agent", call_llm)
-    graph.add_edge(START, "agent")
-    graph.add_edge("agent", END)
+    graph.add_node("planner", planner_node)
+    graph.add_node("worker", _worker)
+    graph.add_edge(START, "planner")
+    graph.add_edge("planner", "worker")
+    graph.add_edge("worker", END)
     return graph.compile()
 
 
