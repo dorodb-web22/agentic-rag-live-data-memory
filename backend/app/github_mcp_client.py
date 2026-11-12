@@ -10,10 +10,12 @@ from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
 
+_VALID_ISSUE_STATES = {"open", "closed", "all"}
+
 
 def _run_coroutine(coro: Any) -> Any:
     """Run an async coroutine from either sync or async execution contexts.
-    
+
     The official Model Context Protocol (MCP) SDK is built strictly async-first
     over asyncio stdio streams. This helper provides a safe bridge for synchronous
     execution contexts (such as standard LangGraph nodes or sync endpoint handlers)
@@ -24,10 +26,10 @@ def _run_coroutine(coro: Any) -> Any:
     except RuntimeError:
         return asyncio.run(coro)
 
-    if loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    return loop.run_until_complete(coro)
+    # get_running_loop() only succeeds when a loop is already running,
+    # so loop.is_running() is always True here. We always use the thread pool.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 class GithubMcpClientError(RuntimeError):
@@ -42,7 +44,9 @@ class GithubMcpClient:
         github_token: str | None = None,
         github_repo: str | None = None,
     ) -> None:
-        self.github_token = github_token or os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+        # Bug 3 fix: strip whitespace so "   " is treated as missing
+        raw_token = github_token or os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN") or ""
+        self.github_token = raw_token.strip()
         if not self.github_token:
             raise GithubMcpClientError(
                 "GITHUB_PERSONAL_ACCESS_TOKEN is not set. "
@@ -63,6 +67,20 @@ class GithubMcpClient:
             },
         )
 
+    def _check_tool_error(self, result: Any) -> None:
+        """Raise GithubMcpClientError if the MCP server flagged a tool-level error.
+
+        Bug 1 fix: CallToolResult.isError is set to True by the GitHub MCP server
+        when the tool call itself fails (e.g. bad auth, 404, rate limit). Without
+        this check the content text is parsed and silently returns [] / {}.
+        """
+        if getattr(result, "isError", False):
+            error_text = next(
+                (item.text for item in result.content if item.type == "text"),
+                "Unknown GitHub MCP tool error",
+            )
+            raise GithubMcpClientError(f"GitHub MCP tool error: {error_text}")
+
     async def list_issues(
         self,
         owner: str,
@@ -70,6 +88,12 @@ class GithubMcpClient:
         state: str = "open",
     ) -> list[dict[str, Any]]:
         """List issues for a GitHub repository via the MCP server."""
+        # Bug 4 fix: validate state before making the remote call
+        if state not in _VALID_ISSUE_STATES:
+            raise GithubMcpClientError(
+                f"Invalid state '{state}'. Must be one of: {_VALID_ISSUE_STATES}"
+            )
+
         server_params = self._build_server_params()
         try:
             async with stdio_client(server_params) as (read, write):
@@ -79,9 +103,16 @@ class GithubMcpClient:
                         "list_issues",
                         arguments={"owner": owner, "repo": repo, "state": state},
                     )
+                    # Bug 1 fix: surface tool-level errors instead of swallowing them
+                    self._check_tool_error(result)
                     for item in result.content:
                         if item.type == "text":
                             data = self._parse_response(item.text)
+                            # Bug 2 fix: raise on error dict instead of silently returning []
+                            if isinstance(data, dict):
+                                raise GithubMcpClientError(
+                                    f"GitHub MCP list_issues returned an error response: {data}"
+                                )
                             if isinstance(data, list):
                                 return data
                     return []
@@ -109,9 +140,16 @@ class GithubMcpClient:
                         "get_issue",
                         arguments={"owner": owner, "repo": repo, "issue_number": issue_number},
                     )
+                    # Bug 1 fix: surface tool-level errors
+                    self._check_tool_error(result)
                     for item in result.content:
                         if item.type == "text":
                             data = self._parse_response(item.text)
+                            # Bug 2 fix: a list is unexpected here — treat as error
+                            if isinstance(data, list):
+                                raise GithubMcpClientError(
+                                    f"GitHub MCP get_issue returned a list instead of a dict: {data}"
+                                )
                             if isinstance(data, dict):
                                 return data
                     return {}
@@ -130,6 +168,12 @@ class GithubMcpClient:
         state: str = "open",
     ) -> list[dict[str, Any]]:
         """List pull requests for a GitHub repository via the MCP server."""
+        # Bug 4 fix: validate state before making the remote call
+        if state not in _VALID_ISSUE_STATES:
+            raise GithubMcpClientError(
+                f"Invalid state '{state}'. Must be one of: {_VALID_ISSUE_STATES}"
+            )
+
         server_params = self._build_server_params()
         try:
             async with stdio_client(server_params) as (read, write):
@@ -139,9 +183,16 @@ class GithubMcpClient:
                         "list_pull_requests",
                         arguments={"owner": owner, "repo": repo, "state": state},
                     )
+                    # Bug 1 fix: surface tool-level errors
+                    self._check_tool_error(result)
                     for item in result.content:
                         if item.type == "text":
                             data = self._parse_response(item.text)
+                            # Bug 2 fix: raise on error dict instead of silently returning []
+                            if isinstance(data, dict):
+                                raise GithubMcpClientError(
+                                    f"GitHub MCP list_pull_requests returned an error response: {data}"
+                                )
                             if isinstance(data, list):
                                 return data
                     return []
