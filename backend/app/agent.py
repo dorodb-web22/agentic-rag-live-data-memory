@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 from typing import Any, NotRequired, Protocol, TypedDict
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
@@ -147,7 +147,8 @@ def create_agent_graph(
                     "Instructions:\n"
                     "1. Provide a direct, factual answer to the user question in Markdown.\n"
                     "2. Under a '### Supporting Evidence' section, display the retrieved database facts (Table, Record ID, Name, Price, Category) in a Markdown table.\n"
-                    "3. Be strictly grounded in the database records provided above.\n\n"
+                    "3. Be strictly grounded in the database records provided above.\n"
+                    "4. If the user question is broad or missing specific parameters (e.g., tier, plan type, or add-on specifications), clearly list what is available and ask the user for the specific missing details to narrow down their request.\n\n"
                     f"User Question: {query}"
                 )
             else:
@@ -159,12 +160,21 @@ def create_agent_graph(
                     "Instructions:\n"
                     "1. Clearly inform the user that no matching record exists in the database for the requested item.\n"
                     "2. Under a '### Supporting Evidence' section, state that the database query returned 0 records.\n"
-                    "3. Do NOT invent, assume, or fabricate any prices or product details.\n\n"
+                    "3. If the user query is ambiguous, incomplete, or might refer to an alternative item, ask clarifying questions for the specific missing information.\n"
+                    "4. Do NOT invent, assume, or fabricate any prices or product details.\n\n"
                     f"User Question: {query}"
                 )
             response = model.invoke([HumanMessage(content=prompt)])
         else:
-            response = model.invoke([HumanMessage(content=query)])
+            system_prompt = (
+                "You are an Agentic RAG Assistant. Provide a direct, helpful, and concise answer in Markdown. "
+                "If the user query is ambiguous, incomplete, or requires missing context or parameters, "
+                "clearly ask the user for the specific missing information."
+            )
+            response = model.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=query),
+            ])
 
         answer = _message_content_to_text(getattr(response, "content", response))
         return {"query": query, "answer": answer, "evidence": evidence}
