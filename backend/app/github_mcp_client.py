@@ -3,10 +3,12 @@ import concurrent.futures
 import json
 import logging
 import os
-from typing import Any, TypedDict
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from app.mcp_types import McpToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +43,6 @@ class GithubMcpTimeoutError(GithubMcpClientError):
     """Raised when a GitHub MCP operation exceeds the configured timeout."""
 
 
-class McpToolResult(TypedDict):
-    success: bool
-    data: Any | None
-    error: str | None
-
-
 class GithubMcpClient:
     """Client for the official GitHub MCP server running over stdio via npx."""
 
@@ -71,9 +67,25 @@ class GithubMcpClient:
         if timeout_seconds is not None:
             self.timeout_seconds = float(timeout_seconds)
         elif env_timeout:
-            self.timeout_seconds = float(env_timeout)
+            try:
+                self.timeout_seconds = float(env_timeout)
+            except ValueError:
+                logger.warning(
+                    "MCP_TIMEOUT_SECONDS='%s' is not a valid number; "
+                    "falling back to default %.1fs.",
+                    env_timeout,
+                    DEFAULT_TIMEOUT_SECONDS,
+                )
+                self.timeout_seconds = DEFAULT_TIMEOUT_SECONDS
         else:
             self.timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        # Bug B guard: a timeout of 0 or negative causes asyncio.wait_for to
+        # cancel every coroutine immediately or raise deep inside asyncio.
+        if self.timeout_seconds <= 0:
+            raise GithubMcpClientError(
+                f"timeout_seconds must be > 0, got {self.timeout_seconds}."
+            )
 
     def _build_server_params(self) -> StdioServerParameters:
         """Build StdioServerParameters for the GitHub MCP server via npx."""
@@ -138,6 +150,10 @@ class GithubMcpClient:
         try:
             return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
+            # coro.close() is redundant in production (asyncio.wait_for wraps coro
+            # in a Task that owns cleanup after cancellation), but is required when
+            # asyncio.wait_for is mock-patched in tests to raise immediately without
+            # consuming the coroutine — without it pytest emits RuntimeWarning.
             coro.close()
             logger.error("GitHub MCP list_issues timed out after %.1fs", self.timeout_seconds)
             raise GithubMcpTimeoutError(
@@ -184,6 +200,10 @@ class GithubMcpClient:
         try:
             return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
+            # coro.close() is redundant in production (asyncio.wait_for wraps coro
+            # in a Task that owns cleanup after cancellation), but is required when
+            # asyncio.wait_for is mock-patched in tests to raise immediately without
+            # consuming the coroutine — without it pytest emits RuntimeWarning.
             coro.close()
             logger.error("GitHub MCP get_issue timed out after %.1fs", self.timeout_seconds)
             raise GithubMcpTimeoutError(
@@ -235,6 +255,10 @@ class GithubMcpClient:
         try:
             return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
+            # coro.close() is redundant in production (asyncio.wait_for wraps coro
+            # in a Task that owns cleanup after cancellation), but is required when
+            # asyncio.wait_for is mock-patched in tests to raise immediately without
+            # consuming the coroutine — without it pytest emits RuntimeWarning.
             coro.close()
             logger.error("GitHub MCP list_pull_requests timed out after %.1fs", self.timeout_seconds)
             raise GithubMcpTimeoutError(

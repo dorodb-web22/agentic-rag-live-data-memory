@@ -285,3 +285,72 @@ def test_sqlite_mcp_timeout_configuration(monkeypatch: pytest.MonkeyPatch, initi
     client_env = SqliteMcpClient(db_path=initialized_db)
     assert client_env.timeout_seconds == 5.5
 
+
+# Bug F fix — tests for get_tables_safe_sync and describe_table_safe_sync
+
+
+def test_sqlite_mcp_get_tables_safe_returns_data_on_success(mcp_client: SqliteMcpClient) -> None:
+    result = mcp_client.get_tables_safe_sync()
+    assert result["success"] is True
+    assert result["error"] is None
+    assert isinstance(result["data"], list)
+    assert "products" in result["data"]
+
+
+def test_sqlite_mcp_get_tables_safe_returns_error_string_on_timeout(mcp_client: SqliteMcpClient) -> None:
+    with patch("app.mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+        result = mcp_client.get_tables_safe_sync()
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "[MCP_TIMEOUT]" in result["error"]
+
+
+def test_sqlite_mcp_describe_table_safe_returns_data_on_success(mcp_client: SqliteMcpClient) -> None:
+    result = mcp_client.describe_table_safe_sync("products")
+    assert result["success"] is True
+    assert result["error"] is None
+    assert isinstance(result["data"], list)
+    column_names = [col["name"] for col in result["data"]]
+    assert "id" in column_names
+    assert "name" in column_names
+
+
+def test_sqlite_mcp_describe_table_safe_returns_error_string_on_timeout(mcp_client: SqliteMcpClient) -> None:
+    with patch("app.mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+        result = mcp_client.describe_table_safe_sync("products")
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "[MCP_TIMEOUT]" in result["error"]
+
+
+# Bug G fix — invalid MCP_TIMEOUT_SECONDS env var falls back to default
+
+
+def test_sqlite_mcp_invalid_timeout_env_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch, initialized_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("MCP_TIMEOUT_SECONDS", "not_a_number")
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.mcp_client"):
+        client = SqliteMcpClient(db_path=initialized_db)
+    assert client.timeout_seconds == 15.0
+    assert "not_a_number" in caplog.text
+
+
+# Bug B fix — timeout_seconds <= 0 must be rejected at construction time
+
+
+def test_sqlite_mcp_zero_timeout_raises_at_construction(initialized_db: Path) -> None:
+    from app.mcp_client import McpClientError
+
+    with pytest.raises(McpClientError, match="timeout_seconds must be > 0"):
+        SqliteMcpClient(db_path=initialized_db, timeout_seconds=0.0)
+
+
+def test_sqlite_mcp_negative_timeout_raises_at_construction(initialized_db: Path) -> None:
+    from app.mcp_client import McpClientError
+
+    with pytest.raises(McpClientError, match="timeout_seconds must be > 0"):
+        SqliteMcpClient(db_path=initialized_db, timeout_seconds=-5.0)
+

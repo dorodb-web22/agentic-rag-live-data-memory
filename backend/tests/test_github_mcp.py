@@ -362,3 +362,26 @@ class TestGithubMcpTimeoutAndSafeWrappers:
         client_env = GithubMcpClient(github_token="test_token")
         assert client_env.timeout_seconds == 8.0
 
+    # Bug G fix — invalid MCP_TIMEOUT_SECONDS env var falls back to default
+
+    def test_github_mcp_invalid_timeout_env_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("MCP_TIMEOUT_SECONDS", "not_a_number")
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="app.github_mcp_client"):
+            client = GithubMcpClient(github_token="test_token")
+        assert client.timeout_seconds == 15.0
+        assert "not_a_number" in caplog.text
+
+    # Bug B fix — timeout_seconds <= 0 must be rejected at construction time
+
+    def test_github_mcp_zero_timeout_raises_at_construction(self) -> None:
+        with pytest.raises(GithubMcpClientError, match="timeout_seconds must be > 0"):
+            GithubMcpClient(github_token="test_token", timeout_seconds=0.0)
+
+    def test_github_mcp_negative_timeout_raises_at_construction(self) -> None:
+        with pytest.raises(GithubMcpClientError, match="timeout_seconds must be > 0"):
+            GithubMcpClient(github_token="test_token", timeout_seconds=-1.0)
+
