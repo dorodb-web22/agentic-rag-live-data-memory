@@ -25,11 +25,11 @@ def test_agent_graph_invokes_llm_and_returns_answer() -> None:
 
     result = graph.invoke({"query": "What is RAG?"})
 
-    assert result == {
-        "query": "What is RAG?",
-        "answer": "A deterministic agent answer.",
-        "evidence": None,
-    }
+    assert result["query"] == "What is RAG?"
+    assert result["answer"] == "A deterministic agent answer."
+    assert result["evidence"] is None
+    assert result["plan"] == "general"
+    assert result["sql"] is None
     assert len(llm.inputs) == 1
 
 
