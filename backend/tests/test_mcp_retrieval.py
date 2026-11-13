@@ -1,6 +1,8 @@
-import os  # noqa: F401 — reserved for future env-var based integration tests
+import asyncio
+import os
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +17,7 @@ from app.agent import (
 )
 from app.db_setup import init_demo_database
 from app.main import app
-from app.mcp_client import McpClientError, SqliteMcpClient
+from app.mcp_client import McpClientError, McpTimeoutError, SqliteMcpClient
 
 
 class RecordingFakeLLM:
@@ -239,3 +241,47 @@ def test_agent_queries_mcp_exactly_once_per_request(
     assert evidence is not None
     assert len(evidence) == 1
     assert evidence[0]["name"] == "Enterprise package"
+
+
+def test_sqlite_mcp_timeout_raises_timeout_error(mcp_client: SqliteMcpClient) -> None:
+    with patch("app.mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+        with pytest.raises(McpTimeoutError) as exc_info:
+            mcp_client.execute_query_sync("SELECT id, name FROM products")
+        assert "timed out after" in str(exc_info.value)
+
+
+def test_sqlite_mcp_safe_query_returns_error_string_on_timeout(mcp_client: SqliteMcpClient) -> None:
+    with patch("app.mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+        result = mcp_client.execute_query_safe_sync("SELECT id, name FROM products")
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "[MCP_TIMEOUT]" in result["error"]
+
+
+def test_sqlite_mcp_safe_query_returns_error_string_on_sql_violation(mcp_client: SqliteMcpClient) -> None:
+    result = mcp_client.execute_query_safe_sync("DROP TABLE products")
+    assert result["success"] is False
+    assert result["data"] is None
+    assert "[MCP_ERROR]" in result["error"]
+
+
+def test_sqlite_mcp_safe_query_returns_data_on_success(mcp_client: SqliteMcpClient) -> None:
+    result = mcp_client.execute_query_safe_sync("SELECT id, name FROM products")
+    assert result["success"] is True
+    assert result["error"] is None
+    assert isinstance(result["data"], list)
+    assert len(result["data"]) > 0
+
+
+def test_sqlite_mcp_timeout_configuration(monkeypatch: pytest.MonkeyPatch, initialized_db: Path) -> None:
+    monkeypatch.delenv("MCP_TIMEOUT_SECONDS", raising=False)
+    client_default = SqliteMcpClient(db_path=initialized_db)
+    assert client_default.timeout_seconds == 15.0
+
+    client_custom = SqliteMcpClient(db_path=initialized_db, timeout_seconds=30.0)
+    assert client_custom.timeout_seconds == 30.0
+
+    monkeypatch.setenv("MCP_TIMEOUT_SECONDS", "5.5")
+    client_env = SqliteMcpClient(db_path=initialized_db)
+    assert client_env.timeout_seconds == 5.5
+

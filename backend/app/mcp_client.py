@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -15,6 +15,7 @@ from mcp.client.stdio import stdio_client
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "demo.db"
+DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -40,6 +41,16 @@ class McpClientError(RuntimeError):
     """Raised when an error occurs during MCP operations."""
 
 
+class McpTimeoutError(McpClientError):
+    """Raised when an MCP operation exceeds the configured timeout."""
+
+
+class McpToolResult(TypedDict):
+    success: bool
+    data: Any | None
+    error: str | None
+
+
 class SqliteMcpClient:
     """Client for the official SQLite MCP server running over stdio."""
 
@@ -47,6 +58,7 @@ class SqliteMcpClient:
         self,
         db_path: str | Path | None = None,
         server_command: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         if db_path is None:
             env_path = os.getenv("SQLITE_DB_PATH")
@@ -59,6 +71,14 @@ class SqliteMcpClient:
 
         self.db_path = Path(db_path).resolve()
         self.server_command = server_command or self._resolve_server_command()
+
+        env_timeout = os.getenv("MCP_TIMEOUT_SECONDS")
+        if timeout_seconds is not None:
+            self.timeout_seconds = float(timeout_seconds)
+        elif env_timeout:
+            self.timeout_seconds = float(env_timeout)
+        else:
+            self.timeout_seconds = DEFAULT_TIMEOUT_SECONDS
 
     def _resolve_server_command(self) -> str:
         """Locate the mcp-server-sqlite binary."""
@@ -115,7 +135,7 @@ class SqliteMcpClient:
             args=["--db-path", str(self.db_path)],
         )
 
-        try:
+        async def _execute() -> list[str]:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -126,6 +146,14 @@ class SqliteMcpClient:
                             if isinstance(data, list):
                                 return [row.get("name", "") for row in data if isinstance(row, dict)]
                     return []
+
+        coro = _execute()
+        try:
+            return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            coro.close()
+            logger.error("SQLite MCP list_tables timed out after %.1fs", self.timeout_seconds)
+            raise McpTimeoutError(f"SQLite MCP list_tables timed out after {self.timeout_seconds}s.") from exc
         except McpClientError:
             raise
         except Exception as exc:
@@ -142,7 +170,7 @@ class SqliteMcpClient:
             args=["--db-path", str(self.db_path)],
         )
 
-        try:
+        async def _execute() -> list[dict[str, Any]]:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -155,6 +183,14 @@ class SqliteMcpClient:
                             if isinstance(data, list):
                                 return data
                     return []
+
+        coro = _execute()
+        try:
+            return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            coro.close()
+            logger.error("SQLite MCP describe_table timed out after %.1fs", self.timeout_seconds)
+            raise McpTimeoutError(f"SQLite MCP describe_table timed out after {self.timeout_seconds}s.") from exc
         except McpClientError:
             raise
         except Exception as exc:
@@ -173,7 +209,7 @@ class SqliteMcpClient:
             args=["--db-path", str(self.db_path)],
         )
 
-        try:
+        async def _execute() -> list[dict[str, Any]]:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -190,6 +226,14 @@ class SqliteMcpClient:
                                 return data
                             return [{"raw_result": data}]
                     return []
+
+        coro = _execute()
+        try:
+            return await asyncio.wait_for(coro, timeout=self.timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            coro.close()
+            logger.error("SQLite MCP read_query timed out after %.1fs", self.timeout_seconds)
+            raise McpTimeoutError(f"SQLite MCP read_query timed out after {self.timeout_seconds}s.") from exc
         except McpClientError:
             raise
         except Exception as exc:
@@ -218,3 +262,46 @@ class SqliteMcpClient:
 
     def execute_query_sync(self, query: str) -> list[dict[str, Any]]:
         return _run_coroutine(self.read_query(query))
+
+    # Safe wrappers returning McpToolResult without raising exceptions
+    def execute_query_safe_sync(self, query: str) -> McpToolResult:
+        """Execute a query returning a graceful McpToolResult instead of raising exceptions.
+
+        Safe to call from LangGraph nodes without crashing the state machine.
+        """
+        try:
+            records = self.execute_query_sync(query)
+            return {"success": True, "data": records, "error": None}
+        except McpTimeoutError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_TIMEOUT] {str(exc)}"}
+        except McpClientError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] {str(exc)}"}
+        except Exception as exc:
+            logger.exception("Unexpected error in execute_query_safe_sync: %s", exc)
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] Unexpected {type(exc).__name__}"}
+
+    def get_tables_safe_sync(self) -> McpToolResult:
+        """Query available tables returning a graceful McpToolResult."""
+        try:
+            tables = self.get_tables_sync()
+            return {"success": True, "data": tables, "error": None}
+        except McpTimeoutError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_TIMEOUT] {str(exc)}"}
+        except McpClientError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] {str(exc)}"}
+        except Exception as exc:
+            logger.exception("Unexpected error in get_tables_safe_sync: %s", exc)
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] Unexpected {type(exc).__name__}"}
+
+    def describe_table_safe_sync(self, table_name: str) -> McpToolResult:
+        """Query table schema information returning a graceful McpToolResult."""
+        try:
+            schema = self.describe_table_sync(table_name)
+            return {"success": True, "data": schema, "error": None}
+        except McpTimeoutError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_TIMEOUT] {str(exc)}"}
+        except McpClientError as exc:
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] {str(exc)}"}
+        except Exception as exc:
+            logger.exception("Unexpected error in describe_table_safe_sync: %s", exc)
+            return {"success": False, "data": None, "error": f"[MCP_ERROR] Unexpected {type(exc).__name__}"}

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Generator
 from types import SimpleNamespace
@@ -5,7 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.github_mcp_client import GithubMcpClient, GithubMcpClientError
+from app.github_mcp_client import (
+    GithubMcpClient,
+    GithubMcpClientError,
+    GithubMcpTimeoutError,
+)
 
 
 class TestGithubMcpClientInit:
@@ -244,3 +249,116 @@ class TestStateValidation:
         client = GithubMcpClient(github_token="test_token")
         result = client.list_issues_sync("owner", "repo", state=state)
         assert result == []
+
+
+class TestGithubMcpTimeoutAndSafeWrappers:
+    def test_github_mcp_timeout_raises_timeout_error(self) -> None:
+        client = GithubMcpClient(github_token="test_token")
+        with patch("app.github_mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+            with pytest.raises(GithubMcpTimeoutError) as exc_info:
+                client.list_issues_sync("owner", "repo")
+            assert "timed out after" in str(exc_info.value)
+
+    def test_github_mcp_safe_list_issues_returns_error_string_on_timeout(self) -> None:
+        client = GithubMcpClient(github_token="test_token")
+        with patch("app.github_mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+            result = client.list_issues_safe_sync("owner", "repo")
+            assert result["success"] is False
+            assert result["data"] is None
+            assert "[MCP_TIMEOUT]" in result["error"]
+
+    @patch("app.github_mcp_client.stdio_client")
+    @patch("app.github_mcp_client.ClientSession")
+    def test_github_mcp_safe_list_issues_returns_data_on_success(
+        self, mock_cls: AsyncMock, mock_stdio: AsyncMock
+    ) -> None:
+        mock_stdio.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        mock_session = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_session
+        issues_data = [{"id": 1, "title": "Safe Issue"}]
+        mock_session.call_tool.return_value = SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(type="text", text=json.dumps(issues_data))],
+        )
+
+        client = GithubMcpClient(github_token="test_token")
+        result = client.list_issues_safe_sync("owner", "repo")
+        assert result["success"] is True
+        assert result["error"] is None
+        assert result["data"] == issues_data
+
+    @patch("app.github_mcp_client.stdio_client")
+    @patch("app.github_mcp_client.ClientSession")
+    def test_github_mcp_safe_get_issue_returns_data_on_success(
+        self, mock_cls: AsyncMock, mock_stdio: AsyncMock
+    ) -> None:
+        mock_stdio.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        mock_session = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_session
+        issue_data = {"id": 1, "title": "Single Issue"}
+        mock_session.call_tool.return_value = SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(type="text", text=json.dumps(issue_data))],
+        )
+
+        client = GithubMcpClient(github_token="test_token")
+        result = client.get_issue_safe_sync("owner", "repo", 1)
+        assert result["success"] is True
+        assert result["error"] is None
+        assert result["data"] == issue_data
+
+    def test_github_mcp_safe_get_issue_returns_error_string_on_timeout(self) -> None:
+        client = GithubMcpClient(github_token="test_token")
+        with patch("app.github_mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+            result = client.get_issue_safe_sync("owner", "repo", 1)
+            assert result["success"] is False
+            assert result["data"] is None
+            assert "[MCP_TIMEOUT]" in result["error"]
+
+    @patch("app.github_mcp_client.stdio_client")
+    @patch("app.github_mcp_client.ClientSession")
+    def test_github_mcp_safe_list_pull_requests_returns_data_on_success(
+        self, mock_cls: AsyncMock, mock_stdio: AsyncMock
+    ) -> None:
+        mock_stdio.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        mock_session = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_session
+        prs_data = [{"id": 1, "title": "Safe PR"}]
+        mock_session.call_tool.return_value = SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(type="text", text=json.dumps(prs_data))],
+        )
+
+        client = GithubMcpClient(github_token="test_token")
+        result = client.list_pull_requests_safe_sync("owner", "repo")
+        assert result["success"] is True
+        assert result["error"] is None
+        assert result["data"] == prs_data
+
+    def test_github_mcp_safe_list_pull_requests_returns_error_string_on_timeout(self) -> None:
+        client = GithubMcpClient(github_token="test_token")
+        with patch("app.github_mcp_client.asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")):
+            result = client.list_pull_requests_safe_sync("owner", "repo")
+            assert result["success"] is False
+            assert result["data"] is None
+            assert "[MCP_TIMEOUT]" in result["error"]
+
+    def test_github_mcp_safe_wrappers_handle_validation_error(self) -> None:
+        client = GithubMcpClient(github_token="test_token")
+        result = client.list_issues_safe_sync("owner", "repo", state="invalid")
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "[MCP_ERROR]" in result["error"]
+
+    def test_github_mcp_timeout_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_TIMEOUT_SECONDS", raising=False)
+        client_default = GithubMcpClient(github_token="test_token")
+        assert client_default.timeout_seconds == 15.0
+
+        client_custom = GithubMcpClient(github_token="test_token", timeout_seconds=45.0)
+        assert client_custom.timeout_seconds == 45.0
+
+        monkeypatch.setenv("MCP_TIMEOUT_SECONDS", "8.0")
+        client_env = GithubMcpClient(github_token="test_token")
+        assert client_env.timeout_seconds == 8.0
+
