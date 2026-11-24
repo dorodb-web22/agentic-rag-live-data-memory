@@ -121,13 +121,16 @@ def _validate_citations(answer: str, records: list[dict[str, Any]]) -> str:
     valid_keys = set(_build_citation_index(records).keys())
 
     def _replace(match: re.Match) -> str:  # type: ignore[type-arg]
-        prefix_space = match.group(1)
+        leading_ws = match.group(1)
         inner_key = match.group(2)
+        trailing_ws = match.group(3)
         if inner_key in valid_keys:
-            return f"{prefix_space}[{inner_key}]"
+            return match.group(0)
+        if leading_ws and trailing_ws:
+            return " "
         return ""
 
-    return re.sub(r"(\s*)\[(Product-[^\]]+)\]", _replace, answer)
+    return re.sub(r"([ \t]*)\[(Product-[^\]]+)\]([ \t]*)", _replace, answer)
 
 
 def create_llm() -> SupportsInvoke:

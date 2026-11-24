@@ -70,6 +70,13 @@ def test_validate_citations_multiple_markers_mixed() -> None:
     assert "[Product-999]" not in validated
 
 
+def test_validate_citations_preserves_newlines_on_stripped_citation() -> None:
+    records = [{"id": 3, "name": "Enterprise"}]
+    answer = "Line 1.\n[Product-99] Line 2."
+    validated = _validate_citations(answer, records)
+    assert validated == "Line 1.\nLine 2."
+
+
 def test_worker_node_prompt_contains_valid_citation_keys() -> None:
     mock_mcp = MagicMock()
     mock_mcp.execute_query_sync.return_value = [
