@@ -59,9 +59,26 @@ def test_worker_calls_mcp_when_plan_is_db() -> None:
     assert result["evidence"] == [
         {"id": 1, "name": "Enterprise package", "price": 5000.0, "category": "Subscriptions"}
     ]
+    assert "Product-1" in str(fake_llm.inputs[0])
+
+
+def test_worker_node_validates_and_strips_fabricated_citation() -> None:
+    mock_mcp = MagicMock()
+    mock_mcp.execute_query_sync.return_value = [
+        {"id": 1, "name": "Enterprise", "price": 5000.0, "category": "Subscriptions"}
+    ]
+    fake_llm = FakeLLM(answer="Costs $5000 [Product-99].")
+    state = {
+        "query": "Enterprise price",
+        "plan": "db",
+        "sql": "SELECT id, name, description, price, category FROM products",
+    }
+    result = worker_node(state, fake_llm, mock_mcp)
+    assert "[Product-99]" not in result["answer"]
+    assert "Costs $5000." in result["answer"]
     mock_mcp.execute_query_sync.assert_called_once_with(state["sql"])
     assert len(fake_llm.inputs) == 1
-    assert "Enterprise package" in str(fake_llm.inputs[0])
+    assert "Enterprise" in str(fake_llm.inputs[0])
 
 
 def test_worker_skips_mcp_when_plan_is_general() -> None:
