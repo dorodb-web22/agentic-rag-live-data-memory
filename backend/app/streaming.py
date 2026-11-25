@@ -8,7 +8,7 @@ from typing import Any
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _sse(event: str, data: Any) -> str:
@@ -24,15 +24,14 @@ def sse_trace(run_id: str | None) -> str | None:
     """Return a trace SSE frame if LangSmith is configured, else None."""
     if os.getenv("LANGCHAIN_TRACING_V2", "").lower() != "true":
         return None
-    if not run_id:
+    if not run_id or not run_id.strip():
         return None
-    project = os.getenv("LANGCHAIN_PROJECT", "default")
-    url = f"https://smith.langchain.com/public/{run_id}/r"
+    url = f"https://smith.langchain.com/public/{run_id.strip()}/r"
     return _sse("trace", {"url": url})
 
 
 def sse_answer(answer: str, evidence: list[dict[str, Any]] | None, thread_id: str | None) -> str:
-    return _sse("answer", {"answer": answer, "evidence": evidence, "thread_id": thread_id})
+    return _sse("answer", {"answer": answer or "", "evidence": evidence, "thread_id": thread_id})
 
 
 def sse_error(message: str) -> str:

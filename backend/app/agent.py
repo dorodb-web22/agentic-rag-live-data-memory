@@ -408,18 +408,12 @@ class BasicAgent:
 
         Uses graph.stream() to get per-node updates.
         """
-        active_checkpointer = self.checkpointer
-        if self._graph is None:
-            self._graph = create_agent_graph(
-                mcp_client=self._mcp_client,
-                checkpointer=active_checkpointer,
-            )
-
         cleaned_thread_id = (
             thread_id.strip()
             if isinstance(thread_id, str) and thread_id.strip()
             else None
         )
+        active_checkpointer = self.checkpointer
         resolved_thread_id = (
             cleaned_thread_id
             if cleaned_thread_id is not None
@@ -436,6 +430,12 @@ class BasicAgent:
         config["run_id"] = run_id
 
         try:
+            if self._graph is None:
+                self._graph = create_agent_graph(
+                    mcp_client=self._mcp_client,
+                    checkpointer=active_checkpointer,
+                )
+
             final_state: dict[str, Any] = {}
             try:
                 stream_iter = self._graph.stream({"query": query}, config, stream_mode="updates")
@@ -463,15 +463,18 @@ class BasicAgent:
                 except Exception:
                     pass
 
+            raw_answer = final_state.get("answer")
+            answer_text = raw_answer if isinstance(raw_answer, str) else ""
             yield {
                 "event": "answer",
                 "data": {
-                    "answer": final_state.get("answer", ""),
+                    "answer": answer_text,
                     "evidence": final_state.get("evidence"),
                     "thread_id": resolved_thread_id,
                 },
             }
         except Exception as exc:
+            logger.exception("Agent stream execution failed: %s", exc)
             yield {"event": "error", "data": {"message": str(exc)}}
         finally:
             yield {"event": "done", "data": {}}

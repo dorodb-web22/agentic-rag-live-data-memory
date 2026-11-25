@@ -131,7 +131,11 @@ def stream_agent(
             # Emit planner start immediately
             yield sse_step("planner", "start")
 
-            for event_dict in agent.stream_with_evidence(request.query, active_thread_id):
+            stream_kwargs: dict[str, Any] = {}
+            if active_thread_id is not None and _accepts_thread_id(agent.stream_with_evidence):
+                stream_kwargs["thread_id"] = active_thread_id
+
+            for event_dict in agent.stream_with_evidence(request.query, **stream_kwargs):
                 event = event_dict.get("event")
                 data = event_dict.get("data", {})
 
@@ -150,8 +154,10 @@ def stream_agent(
                     trace_frame = sse_trace(run_id)
                     if trace_frame:
                         yield trace_frame
+                    raw_answer = data.get("answer")
+                    answer_text = raw_answer if isinstance(raw_answer, str) else ""
                     yield sse_answer(
-                        data.get("answer", ""),
+                        answer_text,
                         data.get("evidence"),
                         data.get("thread_id"),
                     )

@@ -281,3 +281,95 @@ def test_basic_agent_stream_with_evidence_stateless() -> None:
     answer_ev = next(e for e in events if e["event"] == "answer")
     assert "General answer from fake LLM." in answer_ev["data"]["answer"]
     assert events[-1]["event"] == "done"
+
+
+def test_stream_endpoint_rejects_missing_query() -> None:
+    response = client.post("/query/stream", json={})
+    assert response.status_code == 422
+
+
+def test_stream_endpoint_rejects_blank_query() -> None:
+    response = client.post("/query/stream", json={"query": "   "})
+    assert response.status_code == 422
+
+
+def test_stream_endpoint_unconfigured_agent_yields_error_and_done() -> None:
+    class UnconfiguredStreamingAgent:
+        def stream_with_evidence(
+            self,
+            query: str,
+            thread_id: str | None = None,
+        ) -> Iterator[dict[str, Any]]:
+            yield {"event": "error", "data": {"message": "OPENAI_API_KEY is required to call the LLM."}}
+            yield {"event": "done", "data": {}}
+
+    app.dependency_overrides[get_agent] = lambda: UnconfiguredStreamingAgent()
+    try:
+        response = client.post("/query/stream", json={"query": "Hello"})
+        assert response.status_code == 200
+        events = _parse_sse_events(response.text)
+        event_names = [e[0] for e in events]
+        assert "error" in event_names
+        assert event_names[-1] == "done"
+        error_ev = next(e for e in events if e[0] == "error")
+        assert "OPENAI_API_KEY is required" in error_ev[1]["message"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stream_endpoint_multi_turn_persists_memory() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class SequencedFakeLLM:
+        def __init__(self, answers: list[str]) -> None:
+            self.answers = answers
+            self.idx = 0
+
+        def invoke(self, input: object) -> AIMessage:
+            ans = self.answers[min(self.idx, len(self.answers) - 1)]
+            self.idx += 1
+            return AIMessage(content=ans)
+
+    saver = InMemorySaver()
+    mock_mcp = MagicMock()
+    mock_mcp.execute_query_sync.return_value = [
+        {"id": 3, "name": "Enterprise", "price": 5000.0, "category": "Subscriptions"}
+    ]
+    fake_llm = SequencedFakeLLM(
+        answers=[
+            "Enterprise tier costs $5000.",
+            "Yes, that includes 24/7 dedicated support.",
+        ]
+    )
+    graph = create_agent_graph(llm=fake_llm, mcp_client=mock_mcp, checkpointer=saver)
+    agent = BasicAgent(graph=graph, mcp_client=mock_mcp, checkpointer=saver)
+
+    app.dependency_overrides[get_agent] = lambda: agent
+    try:
+        # Turn 1
+        res1 = client.post("/query/stream", json={"query": "What is Enterprise price?"})
+        assert res1.status_code == 200
+        events1 = _parse_sse_events(res1.text)
+        answer_ev1 = next(e for e in events1 if e[0] == "answer")
+        assert "Enterprise tier costs $5000." in answer_ev1[1]["answer"]
+        assert isinstance(answer_ev1[1]["thread_id"], str)
+        assigned_tid = answer_ev1[1]["thread_id"]
+
+        # Turn 2: Reusing thread_id
+        res2 = client.post(
+            "/query/stream",
+            json={"query": "Does that include support?", "thread_id": assigned_tid},
+        )
+        assert res2.status_code == 200
+        events2 = _parse_sse_events(res2.text)
+        answer_ev2 = next(e for e in events2 if e[0] == "answer")
+        assert "24/7 dedicated support" in answer_ev2[1]["answer"]
+        assert answer_ev2[1]["thread_id"] == assigned_tid
+
+        # Verify thread state saved 4 messages across 2 turns
+        saved_state = agent.get_thread_state(assigned_tid)
+        assert saved_state is not None
+        assert len(saved_state.get("messages", [])) == 4
+    finally:
+        app.dependency_overrides.clear()
+
