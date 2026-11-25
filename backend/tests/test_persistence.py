@@ -54,8 +54,18 @@ def test_resolve_database_url_rejects_missing_or_blank(monkeypatch: pytest.Monke
 
 
 def test_resolve_database_url_rejects_non_postgres_scheme() -> None:
-    with pytest.raises(PersistenceNotConfiguredError, match="must start with 'postgresql://'"):
+    with pytest.raises(PersistenceNotConfiguredError, match=r"must start with 'postgresql://' or 'postgres://'"):
         resolve_database_url("sqlite:///tmp/demo.db")
+
+
+def test_create_connection_pool_rejects_min_size_zero() -> None:
+    with pytest.raises(PersistenceError, match="min_size must be >= 1"):
+        create_connection_pool(
+            database_url="postgresql://postgres:postgres@localhost:5432/agentic_rag",
+            min_size=0,
+            max_size=5,
+            open_pool=False,
+        )
 
 
 def test_create_connection_pool_configures_autocommit_and_dict_row() -> None:

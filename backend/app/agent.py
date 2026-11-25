@@ -369,7 +369,16 @@ class BasicAgent:
                 config = {"configurable": {"thread_id": resolved_thread_id}}
                 try:
                     result = self._graph.invoke({"query": query}, config)
-                except TypeError:
+                except TypeError as exc:
+                    # Only swallow TypeErrors that indicate the compiled graph does not
+                    # accept the 'config' keyword (older LangGraph compat shim).  Real
+                    # TypeErrors from inside graph nodes must propagate so they are not
+                    # silently hidden.
+                    if "config" not in str(exc) and "argument" not in str(exc):
+                        raise
+                    logger.debug(
+                        "Graph does not accept config kwarg; retrying without: %s", exc
+                    )
                     result = self._graph.invoke({"query": query})
             else:
                 result = self._graph.invoke({"query": query})
