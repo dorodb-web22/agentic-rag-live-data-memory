@@ -2,16 +2,22 @@ import json
 import logging
 import os
 import re
+import uuid
 from functools import lru_cache
-from typing import Any, NotRequired, Protocol, TypedDict
+from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
 from app.mcp_client import McpClientError, SqliteMcpClient
+from app.persistence import PersistenceError, PersistenceNotConfiguredError
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_CHECKPOINTER: BaseCheckpointSaver | None = None
 
 DATABASE_KEYWORDS = {
     "product", "products", "price", "prices", "cost", "costs", "package", "packages",
@@ -79,6 +85,7 @@ class SupportsInvoke(Protocol):
 
 
 class AgentState(TypedDict):
+    messages: NotRequired[Annotated[list[AnyMessage], add_messages]]
     query: str
     plan: NotRequired[str | None]
     sql: NotRequired[str | None]
@@ -171,6 +178,18 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     return {"plan": "general", "sql": None}
 
 
+def _extract_prior_messages(state: AgentState, query: str) -> tuple[list[AnyMessage], bool]:
+    """Extract conversation history prior to the current turn's user query."""
+    raw_messages = list(state.get("messages") or [])
+    if (
+        raw_messages
+        and isinstance(raw_messages[-1], HumanMessage)
+        and _message_content_to_text(raw_messages[-1].content) == query
+    ):
+        return raw_messages[:-1], True
+    return raw_messages, False
+
+
 def worker_node(
     state: AgentState,
     model: SupportsInvoke,
@@ -181,6 +200,7 @@ def worker_node(
     plan = state.get("plan", "general")
     sql = state.get("sql")
     evidence: list[dict[str, Any]] | None = None
+    prior_messages, already_has_user_msg = _extract_prior_messages(state, query)
 
     if plan == "db":
         if not sql or not sql.strip():
@@ -247,7 +267,7 @@ def worker_node(
                 "5. Do NOT add any citation markers — there are no records to cite.\n\n"
                 f"User Question: {query}"
             )
-        response = model.invoke([HumanMessage(content=prompt)])
+        response = model.invoke([*prior_messages, HumanMessage(content=prompt)])
     elif plan == "general":
         system_prompt = (
             "You are an Agentic RAG Assistant. Provide a direct, helpful, and concise answer in Markdown. "
@@ -256,6 +276,7 @@ def worker_node(
         )
         response = model.invoke([
             SystemMessage(content=system_prompt),
+            *prior_messages,
             HumanMessage(content=query),
         ])
     else:
@@ -264,13 +285,20 @@ def worker_node(
     answer = _message_content_to_text(getattr(response, "content", response))
     if plan == "db" and isinstance(evidence, list):
         answer = _validate_citations(answer, evidence)
-    return {"answer": answer, "evidence": evidence}
+
+    new_messages: list[AnyMessage] = (
+        [AIMessage(content=answer)]
+        if already_has_user_msg
+        else [HumanMessage(content=query), AIMessage(content=answer)]
+    )
+    return {"answer": answer, "evidence": evidence, "messages": new_messages}
 
 
 def create_agent_graph(
     llm: SupportsInvoke | None = None,
     mcp_client: SqliteMcpClient | None = None,
-) -> SupportsInvoke:
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> Any:
     model = llm or create_llm()
     client = mcp_client or SqliteMcpClient()
 
@@ -283,29 +311,74 @@ def create_agent_graph(
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "worker")
     graph.add_edge("worker", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 class BasicAgent:
     def __init__(
         self,
-        graph: SupportsInvoke | None = None,
+        graph: Any | None = None,
         mcp_client: SqliteMcpClient | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._graph = graph
         self._mcp_client = mcp_client
+        self._checkpointer = checkpointer
+        self.last_thread_id: str | None = None
 
-    def answer(self, query: str) -> str:
-        answer, _ = self.query_with_evidence(query)
+    @property
+    def checkpointer(self) -> BaseCheckpointSaver | None:
+        if self._checkpointer is not None:
+            return self._checkpointer
+        if self._graph is not None:
+            return getattr(self._graph, "checkpointer", None)
+        return _DEFAULT_CHECKPOINTER
+
+    def answer(self, query: str, thread_id: str | None = None) -> str:
+        answer, _ = self.query_with_evidence(query, thread_id=thread_id)
         return answer
 
-    def query_with_evidence(self, query: str) -> tuple[str, list[dict[str, Any]] | None]:
+    def query_with_evidence(
+        self,
+        query: str,
+        thread_id: str | None = None,
+    ) -> tuple[str, list[dict[str, Any]] | None]:
+        active_checkpointer = self.checkpointer
         if self._graph is None:
-            self._graph = create_agent_graph(mcp_client=self._mcp_client)
+            self._graph = create_agent_graph(
+                mcp_client=self._mcp_client,
+                checkpointer=active_checkpointer,
+            )
+
+        cleaned_thread_id = (
+            thread_id.strip()
+            if isinstance(thread_id, str) and thread_id.strip()
+            else None
+        )
+        resolved_thread_id = (
+            cleaned_thread_id
+            if cleaned_thread_id is not None
+            else (str(uuid.uuid4()) if active_checkpointer is not None else None)
+        )
+        self.last_thread_id = resolved_thread_id
+
         try:
-            result = self._graph.invoke({"query": query})
+            if resolved_thread_id is not None and (
+                active_checkpointer is not None or cleaned_thread_id is not None
+            ):
+                config = {"configurable": {"thread_id": resolved_thread_id}}
+                try:
+                    result = self._graph.invoke({"query": query}, config)
+                except TypeError:
+                    result = self._graph.invoke({"query": query})
+            else:
+                result = self._graph.invoke({"query": query})
         except AgentError:
             raise
+        except PersistenceNotConfiguredError as error:
+            raise AgentNotConfiguredError(str(error)) from error
+        except PersistenceError as error:
+            raise AgentError(str(error)) from error
         except Exception as error:
             logger.exception("LLM request failed")
             raise AgentError(f"LLM request failed ({type(error).__name__}).") from error
@@ -315,7 +388,23 @@ class BasicAgent:
         evidence = result.get("evidence")
         return result["answer"], evidence
 
+    def get_thread_state(self, thread_id: str) -> dict[str, Any] | None:
+        """Retrieve the latest checkpoint state values for a given thread_id."""
+        if self._graph is None or not hasattr(self._graph, "get_state"):
+            return None
+        snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
+        if snapshot is None or not getattr(snapshot, "values", None):
+            return None
+        return dict(snapshot.values)
+
+
+def configure_default_checkpointer(checkpointer: BaseCheckpointSaver | None) -> None:
+    """Configure the process-wide checkpointer used by the default BasicAgent singleton."""
+    global _DEFAULT_CHECKPOINTER
+    _DEFAULT_CHECKPOINTER = checkpointer
+    get_agent.cache_clear()
+
 
 @lru_cache
 def get_agent() -> BasicAgent:
-    return BasicAgent()
+    return BasicAgent(checkpointer=_DEFAULT_CHECKPOINTER)
