@@ -92,3 +92,13 @@ footer { margin-top: auto; padding-top: 28px; color: #97a2b2; font-size: 11px; }
 .trace-duration { color: #63738b; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .trace-link { display: inline-block; margin-top: 16px; color: #355b9a; font-size: 13px; font-weight: 600; }
 @media (max-width: 900px) { .app-layout { flex-direction: column; } .trace-sidebar { width: auto; border-left: 0; border-top: 1px solid #e6ebf2; padding: 24px 20px; } }
+.examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip { min-height: 32px; padding: 0 12px; border: 1px solid #d9e1eb; background: #fff; color: #355b9a; font-size: 12px; font-weight: 600; border-radius: 999px; }
+.chip:hover:not(:disabled) { background: #f1f5fc; transform: none; }
+.actions { display: inline-flex; gap: 8px; align-items: center; }
+button.secondary { background: #fff; color: #355b9a; border: 1px solid #c4d2ec; }
+button.secondary:hover:not(:disabled) { background: #f1f5fc; }
+.cite { display: inline-block; margin-left: 2px; padding: 0 6px; border-radius: 999px; background: #e8eefb; color: #284b87; font-size: 10.5px; font-weight: 700; line-height: 1.7; vertical-align: baseline; position: relative; top: -1px; cursor: help; }
+.trace-step { animation: trace-in .2s ease-out; }
+@keyframes trace-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (max-width: 560px) { .actions { width: 100%; flex-direction: column; } .actions button { width: 100%; } }

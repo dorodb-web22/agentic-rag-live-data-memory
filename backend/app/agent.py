@@ -10,6 +10,7 @@ from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
@@ -78,6 +79,39 @@ class AgentError(RuntimeError):
 
 class AgentNotConfiguredError(AgentError):
     """Raised when the configured LLM provider is missing required settings."""
+
+
+class AgentRecursionLimitError(AgentError):
+    """Raised when the graph exceeds its strict recursion (step) limit."""
+
+
+DEFAULT_RECURSION_LIMIT = 10
+MIN_RECURSION_LIMIT = 3  # START -> planner -> worker -> END needs headroom
+MAX_RECURSION_LIMIT = 50
+
+
+def get_recursion_limit() -> int:
+    """Resolve the strict graph step limit from AGENT_RECURSION_LIMIT (clamped, never unbounded)."""
+    raw = os.getenv("AGENT_RECURSION_LIMIT")
+    if raw is None or not raw.strip():
+        return DEFAULT_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid AGENT_RECURSION_LIMIT=%r; using %d", raw, DEFAULT_RECURSION_LIMIT)
+        return DEFAULT_RECURSION_LIMIT
+    return max(MIN_RECURSION_LIMIT, min(value, MAX_RECURSION_LIMIT))
+
+
+def _is_config_signature_error(exc: TypeError) -> bool:
+    message = str(exc)
+    return "positional argument" in message or "unexpected keyword argument" in message
+
+
+def _recursion_error() -> AgentRecursionLimitError:
+    return AgentRecursionLimitError(
+        f"The agent exceeded its step limit ({get_recursion_limit()}) and was stopped to prevent an infinite loop."
+    )
 
 
 class SupportsInvoke(Protocol):
@@ -364,28 +398,28 @@ class BasicAgent:
         )
         self.last_thread_id = resolved_thread_id
 
+        config: dict[str, Any] = {"recursion_limit": get_recursion_limit()}
+        if resolved_thread_id is not None and (
+            active_checkpointer is not None or cleaned_thread_id is not None
+        ):
+            config["configurable"] = {"thread_id": resolved_thread_id}
+
         try:
-            if resolved_thread_id is not None and (
-                active_checkpointer is not None or cleaned_thread_id is not None
-            ):
-                config = {"configurable": {"thread_id": resolved_thread_id}}
-                try:
-                    result = self._graph.invoke({"query": query}, config)
-                except TypeError as exc:
-                    # Only swallow TypeErrors that indicate the compiled graph does not
-                    # accept the 'config' keyword (older LangGraph compat shim).  Real
-                    # TypeErrors from inside graph nodes must propagate so they are not
-                    # silently hidden.
-                    if "config" not in str(exc) and "argument" not in str(exc):
-                        raise
-                    logger.debug(
-                        "Graph does not accept config kwarg; retrying without: %s", exc
-                    )
-                    result = self._graph.invoke({"query": query})
-            else:
+            try:
+                result = self._graph.invoke({"query": query}, config)
+            except TypeError as exc:
+                # Only swallow TypeErrors that indicate the graph does not accept a
+                # config argument (simple stub graphs). Real TypeErrors from inside
+                # graph nodes must propagate.
+                if not _is_config_signature_error(exc):
+                    raise
+                logger.debug("Graph does not accept config; retrying without: %s", exc)
                 result = self._graph.invoke({"query": query})
         except AgentError:
             raise
+        except GraphRecursionError as error:
+            logger.error("Graph recursion limit hit: %s", error)
+            raise _recursion_error() from error
         except PersistenceNotConfiguredError as error:
             raise AgentNotConfiguredError(str(error)) from error
         except PersistenceError as error:
@@ -428,6 +462,7 @@ class BasicAgent:
         if resolved_thread_id is not None:
             config["configurable"] = {"thread_id": resolved_thread_id}
         config["run_id"] = run_id
+        config["recursion_limit"] = get_recursion_limit()
 
         try:
             if self._graph is None:
@@ -473,6 +508,9 @@ class BasicAgent:
                     "thread_id": resolved_thread_id,
                 },
             }
+        except GraphRecursionError as exc:
+            logger.error("Graph recursion limit hit: %s", exc)
+            yield {"event": "error", "data": {"message": str(_recursion_error())}}
         except Exception as exc:
             logger.exception("Agent stream execution failed: %s", exc)
             yield {"event": "error", "data": {"message": str(exc)}}

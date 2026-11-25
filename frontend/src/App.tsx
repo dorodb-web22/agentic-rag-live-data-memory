@@ -1,12 +1,19 @@
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import ExecutionTrace from './ExecutionTrace';
+import { linkifyCitations, MAX_QUERY_LENGTH } from './streaming';
 import { useQueryStream } from './useQueryStream';
+
+const EXAMPLES = [
+  'How much does the Enterprise plan cost?',
+  'Compare Starter and Professional pricing',
+  'What add-ons are available?',
+];
 
 export default function App() {
   const [query, setQuery] = useState('');
-  const { steps, answer, traceUrl, error, loading, submit } = useQueryStream();
+  const { steps, answer, traceUrl, error, loading, hasThread, submit, stop, reset } = useQueryStream();
   const answerRef = useRef<HTMLDivElement>(null);
 
   async function submitQuery(event: FormEvent<HTMLFormElement>) {
@@ -14,7 +21,15 @@ export default function App() {
     const trimmedQuery = query.trim();
     if (!trimmedQuery || loading) return;
     await submit(trimmedQuery);
+    setQuery('');
     requestAnimationFrame(() => answerRef.current?.focus());
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
   }
 
   return (
@@ -34,14 +49,36 @@ export default function App() {
             placeholder="What would you like to know?"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={onKeyDown}
+            maxLength={MAX_QUERY_LENGTH}
             disabled={loading}
             required
           />
+          {!answer && !loading && !query && (
+            <div className="examples" aria-label="Example questions">
+              {EXAMPLES.map((example) => (
+                <button key={example} type="button" className="chip" onClick={() => setQuery(example)}>
+                  {example}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="form-footer">
-            <span className="hint">Your question is sent to the local assistant.</span>
-            <button type="submit" disabled={loading || !query.trim()}>
-              {loading ? <><span className="spinner" aria-hidden="true" /> Asking…</> : 'Ask question'}
-            </button>
+            <span className="hint">
+              {hasThread ? 'Conversation memory is on · ' : ''}
+              {query.length}/{MAX_QUERY_LENGTH} · ⌘/Ctrl+Enter to send
+            </span>
+            <span className="actions">
+              {hasThread && !loading && (
+                <button type="button" className="secondary" onClick={reset}>New conversation</button>
+              )}
+              {loading ? (
+                <button type="button" className="secondary" onClick={stop}>Stop</button>
+              ) : null}
+              <button type="submit" disabled={loading || !query.trim()}>
+                {loading ? <><span className="spinner" aria-hidden="true" /> Asking…</> : 'Ask question'}
+              </button>
+            </span>
           </div>
         </form>
 
@@ -56,13 +93,18 @@ export default function App() {
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                      a: ({ node: _node, href, children, ...props }) =>
+                        href?.startsWith('#cite-') ? (
+                          <sup className="cite" title={`Source: ${href.slice(6)}`}>{children}</sup>
+                        ) : (
+                          <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                        ),
                       table: ({ node: _node, ...props }) => (
                         <div className="table-scroll"><table {...props} /></div>
                       ),
                     }}
                   >
-                    {answer}
+                    {linkifyCitations(answer)}
                   </ReactMarkdown>
                 </div>
               )}

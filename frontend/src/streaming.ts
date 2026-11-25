@@ -97,3 +97,10 @@ export const NODE_LABELS: Record<TraceNode, { label: string; detail: string }> =
   planner: { label: 'Planning', detail: 'Selecting tool & building query' },
   worker: { label: 'Working', detail: 'Reviewing data & writing answer' },
 };
+
+/** Turn `[Product-3]` markers into markdown links (`#cite-Product-3`) so the UI can render badges. */
+export function linkifyCitations(markdown: string): string {
+  return markdown.replace(/\[(Product-[A-Za-z0-9_]+)\](?!\()/g, '[$1](#cite-$1)');
+}
+
+export const MAX_QUERY_LENGTH = 2000;

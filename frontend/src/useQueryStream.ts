@@ -11,6 +11,17 @@ import {
 
 const USE_MOCK = import.meta.env.VITE_MOCK_STREAM === 'true';
 
+async function describeFailure(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === 'string' && body.detail) return body.detail;
+  } catch {
+    /* fall through to generic message */
+  }
+  if (response.status === 422) return 'That question could not be processed. Try shortening or rephrasing it.';
+  return `The request failed (${response.status}). Please try again.`;
+}
+
 async function* fetchStream(
   query: string,
   threadId: string | null,
@@ -23,7 +34,7 @@ async function* fetchStream(
     signal,
   });
   if (!response.ok || !response.body) {
-    throw new Error(`The request failed (${response.status}). Please try again.`);
+    throw new Error(await describeFailure(response));
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -51,6 +62,7 @@ export function useQueryStream() {
   const [loading, setLoading] = useState(false);
   const threadIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [hasThread, setHasThread] = useState(false);
 
   const submit = useCallback(async (query: string) => {
     abortRef.current?.abort();
@@ -72,7 +84,10 @@ export function useQueryStream() {
         else if (event.type === 'trace') setTraceUrl(event.data.url);
         else if (event.type === 'answer') {
           setAnswer(event.data.answer);
-          if (event.data.thread_id) threadIdRef.current = event.data.thread_id;
+          if (event.data.thread_id) {
+            threadIdRef.current = event.data.thread_id;
+            setHasThread(true);
+          }
         } else if (event.type === 'error') setError(event.data.message);
       }
     } catch (cause) {
@@ -92,5 +107,24 @@ export function useQueryStream() {
     }
   }, []);
 
-  return { steps, answer, traceUrl, error, loading, submit };
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSteps((prev) => closeRunningSteps(prev));
+    setLoading(false);
+  }, []);
+
+  const reset = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    threadIdRef.current = null;
+    setHasThread(false);
+    setSteps([]);
+    setAnswer('');
+    setTraceUrl(undefined);
+    setError('');
+    setLoading(false);
+  }, []);
+
+  return { steps, answer, traceUrl, error, loading, hasThread, submit, stop, reset };
 }

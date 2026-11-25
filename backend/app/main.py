@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from app.agent import (
     AgentError,
     AgentNotConfiguredError,
+    AgentRecursionLimitError,
     BasicAgent,
     configure_default_checkpointer,
     get_agent,
@@ -105,6 +106,11 @@ def query_agent(
     except AgentNotConfiguredError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    except AgentRecursionLimitError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(error),
         ) from error
     except AgentError as error:
