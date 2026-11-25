@@ -40,3 +40,31 @@ describe('applyStepEvent', () => {
     expect(steps[0].status).toBe('done');
   });
 });
+
+import { linkifyCitations } from './streaming';
+
+describe('linkifyCitations', () => {
+  it('turns citation markers into cite links and leaves other brackets alone', () => {
+    expect(linkifyCitations('Costs $5000 [Product-3]. See [docs](http://x) and [note].')).toBe(
+      'Costs $5000 [Product-3](#cite-Product-3). See [docs](http://x) and [note].',
+    );
+  });
+  it('is idempotent', () => {
+    const once = linkifyCitations('a [Product-1]');
+    expect(linkifyCitations(once)).toBe(once);
+  });
+});
+
+import { mockStream } from './mockStream';
+
+describe('mockStream', () => {
+  it('stops emitting immediately when aborted mid-stream', async () => {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    for await (const event of mockStream('test', null, controller.signal)) {
+      seen.push(event.type);
+      controller.abort();
+    }
+    expect(seen).toEqual(['step']);
+  });
+});
