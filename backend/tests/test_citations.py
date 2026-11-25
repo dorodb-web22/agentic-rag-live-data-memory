@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent import (
     BasicAgent,
@@ -14,13 +15,19 @@ from app.agent import (
 
 
 class FakeLLM:
-    def __init__(self, answer: str = "A mock LLM answer.") -> None:
+    def __init__(self, answer: str | list[str] = "A mock LLM answer.") -> None:
         self.inputs: list[object] = []
-        self.answer = answer
+        if isinstance(answer, list):
+            self._answers = list(answer)
+        else:
+            self._answers = [answer]
+        self._index = 0
 
     def invoke(self, input: object) -> AIMessage:
         self.inputs.append(input)
-        return AIMessage(content=self.answer)
+        ans = self._answers[min(self._index, len(self._answers) - 1)]
+        self._index += 1
+        return AIMessage(content=ans)
 
 
 def test_build_citation_index_uses_id_field() -> None:
@@ -110,3 +117,46 @@ def test_worker_node_strips_fabricated_citation_in_answer() -> None:
 
     assert "[Product-99]" not in result["answer"]
     assert "costs $5000." in result["answer"]
+
+
+def test_multi_turn_citation_and_memory_synergy() -> None:
+    checkpointer = InMemorySaver()
+    mock_mcp = MagicMock()
+
+    def mcp_side_effect(sql: str) -> list[dict[str, Any]]:
+        if "enterprise" in sql.lower():
+            return [{"id": 3, "name": "Enterprise package", "price": 5000.0, "category": "Subscriptions"}]
+        elif "starter" in sql.lower():
+            return [{"id": 1, "name": "Starter package", "price": 29.0, "category": "Subscriptions"}]
+        return []
+
+    mock_mcp.execute_query_sync.side_effect = mcp_side_effect
+
+    fake_llm = FakeLLM(
+        answer=[
+            "The Enterprise package costs $5,000 [Product-3].",
+            "The Starter package costs $29 [Product-1], compared to the package discussed earlier.",
+        ]
+    )
+    graph = create_agent_graph(llm=fake_llm, mcp_client=mock_mcp, checkpointer=checkpointer)
+    agent = BasicAgent(graph=graph, mcp_client=mock_mcp, checkpointer=checkpointer)
+
+    thread_id = "test-synergy-thread-1"
+
+    # Turn 1: Enterprise query
+    ans_1, ev_1 = agent.query_with_evidence("What is the price of the Enterprise package?", thread_id=thread_id)
+    assert "[Product-3]" in ans_1
+    assert ev_1 == [{"id": 3, "name": "Enterprise package", "price": 5000.0, "category": "Subscriptions"}]
+
+    # Turn 2: Follow-up query referencing Starter
+    ans_2, ev_2 = agent.query_with_evidence("What is the price of the Starter package compared to earlier?", thread_id=thread_id)
+    assert "[Product-1]" in ans_2
+    assert ev_2 == [{"id": 1, "name": "Starter package", "price": 29.0, "category": "Subscriptions"}]
+
+    # Verify Turn 2 LLM prompt received Turn 1 conversation history in prior_messages
+    turn2_inputs = fake_llm.inputs[1]
+    turn2_text = "\n".join(str(getattr(m, "content", m)) for m in turn2_inputs)
+    assert "What is the price of the Enterprise package?" in turn2_text
+    assert "The Enterprise package costs $5,000 [Product-3]." in turn2_text
+    assert "Product-1" in turn2_text
+
