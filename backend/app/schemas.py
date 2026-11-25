@@ -1,8 +1,12 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
+
+MAX_QUERY_LENGTH = 2000
 
 
 class QueryRequest(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     thread_id: str | None = Field(default=None)
 
     @field_validator("query")
@@ -26,3 +30,14 @@ class QueryResponse(BaseModel):
     answer: str
     evidence: list[dict[str, object]] | None = None
     thread_id: str | None = None
+
+
+class ThreadMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ThreadHistoryResponse(BaseModel):
+    thread_id: str
+    messages: list[ThreadMessage]
+    evidence: list[dict[str, object]] | None = None
