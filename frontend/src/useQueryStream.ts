@@ -64,7 +64,7 @@ export function useQueryStream() {
   const abortRef = useRef<AbortController | null>(null);
   const [hasThread, setHasThread] = useState(false);
 
-  const submit = useCallback(async (query: string) => {
+  const submit = useCallback(async (query: string): Promise<boolean> => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -75,14 +75,17 @@ export function useQueryStream() {
     setSteps([]);
     setTraceUrl(undefined);
 
+    let answered = false;
     try {
       const source = USE_MOCK
-        ? mockStream(query, threadIdRef.current)
+        ? mockStream(query, threadIdRef.current, controller.signal)
         : fetchStream(query, threadIdRef.current, controller.signal);
       for await (const event of source) {
+        if (controller.signal.aborted || abortRef.current !== controller) break;
         if (event.type === 'step') setSteps((prev) => applyStepEvent(prev, event.data));
         else if (event.type === 'trace') setTraceUrl(event.data.url);
         else if (event.type === 'answer') {
+          answered = true;
           setAnswer(event.data.answer);
           if (event.data.thread_id) {
             threadIdRef.current = event.data.thread_id;
@@ -90,8 +93,9 @@ export function useQueryStream() {
           }
         } else if (event.type === 'error') setError(event.data.message);
       }
+      return !controller.signal.aborted && answered;
     } catch (cause) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return false;
       setError(
         cause instanceof TypeError
           ? 'Could not connect to the backend. Check that the local API is running and try again.'
@@ -99,6 +103,7 @@ export function useQueryStream() {
             ? cause.message
             : 'Something went wrong. Please try again.',
       );
+      return false;
     } finally {
       if (abortRef.current === controller) {
         setSteps((prev) => closeRunningSteps(prev));

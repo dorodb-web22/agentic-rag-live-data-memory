@@ -20,9 +20,11 @@ export default function App() {
     event.preventDefault();
     const trimmedQuery = query.trim();
     if (!trimmedQuery || loading) return;
-    await submit(trimmedQuery);
-    setQuery('');
-    requestAnimationFrame(() => answerRef.current?.focus());
+    const completed = await submit(trimmedQuery);
+    if (completed) {
+      setQuery('');
+      requestAnimationFrame(() => answerRef.current?.focus());
+    }
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {

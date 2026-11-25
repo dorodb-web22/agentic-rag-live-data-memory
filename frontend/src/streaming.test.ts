@@ -54,3 +54,17 @@ describe('linkifyCitations', () => {
     expect(linkifyCitations(once)).toBe(once);
   });
 });
+
+import { mockStream } from './mockStream';
+
+describe('mockStream', () => {
+  it('stops emitting immediately when aborted mid-stream', async () => {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    for await (const event of mockStream('test', null, controller.signal)) {
+      seen.push(event.type);
+      controller.abort();
+    }
+    expect(seen).toEqual(['step']);
+  });
+});
