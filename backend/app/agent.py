@@ -519,12 +519,22 @@ class BasicAgent:
 
     def get_thread_state(self, thread_id: str) -> dict[str, Any] | None:
         """Retrieve the latest checkpoint state values for a given thread_id."""
-        if self._graph is None or not hasattr(self._graph, "get_state"):
+        cleaned = thread_id.strip() if isinstance(thread_id, str) else ""
+        if not cleaned:
             return None
-        snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
-        if snapshot is None or not getattr(snapshot, "values", None):
-            return None
-        return dict(snapshot.values)
+        config = {"configurable": {"thread_id": cleaned}}
+        if self._graph is not None and hasattr(self._graph, "get_state"):
+            snapshot = self._graph.get_state(config)
+            if snapshot is not None and getattr(snapshot, "values", None):
+                return dict(snapshot.values)
+        saver = self.checkpointer
+        if saver is not None and hasattr(saver, "get_tuple"):
+            tup = saver.get_tuple(config)
+            if tup is not None:
+                checkpoint = getattr(tup, "checkpoint", None)
+                if isinstance(checkpoint, dict) and checkpoint.get("channel_values"):
+                    return dict(checkpoint["channel_values"])
+        return None
 
 
 def configure_default_checkpointer(checkpointer: BaseCheckpointSaver | None) -> None:

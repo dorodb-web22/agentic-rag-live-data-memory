@@ -8,17 +8,27 @@ function formatDuration(ms?: number): string {
 }
 
 export default function ExecutionTrace({ steps, traceUrl }: Props) {
+  const isLive = steps.some((s) => s.status === 'running');
   return (
-    <aside className="trace-sidebar" aria-label="Execution trace">
-      <h2>Execution Trace</h2>
+    <aside className="inspector-card trace-sidebar" aria-label="Execution trace">
+      <div className="inspector-header">
+        <h2>Execution Trace</h2>
+        {isLive && <span className="live-pill">Live</span>}
+      </div>
       {steps.length === 0 ? (
-        <p className="trace-empty">Agent steps will appear here when you ask a question.</p>
+        <p className="trace-empty inspector-empty">
+          Agent steps will appear here when you ask a question.
+        </p>
       ) : (
         <ol className="trace-list" aria-live="polite">
           {steps.map((step) => (
             <li key={step.id} className={`trace-step ${step.status}`} data-testid="trace-step">
               <span className="trace-icon" aria-hidden="true">
-                {step.status === 'running' ? <span className="spinner trace-spinner" /> : '✓'}
+                {step.status === 'running' ? (
+                  <span className="spinner trace-spinner" />
+                ) : (
+                  '✓'
+                )}
               </span>
               <span className="trace-text">
                 <strong>{NODE_LABELS[step.node].label}</strong>

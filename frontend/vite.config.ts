@@ -1,16 +1,22 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const apiOrigin = process.env.VITE_API_ORIGIN || 'http://localhost:8000';
+
 export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
       '/query': {
-        target: process.env.VITE_API_ORIGIN || 'http://localhost:8000',
+        target: apiOrigin,
         changeOrigin: true,
       },
       '/health': {
-        target: process.env.VITE_API_ORIGIN || 'http://localhost:8000',
+        target: apiOrigin,
+        changeOrigin: true,
+      },
+      '/threads': {
+        target: apiOrigin,
         changeOrigin: true,
       },
     },

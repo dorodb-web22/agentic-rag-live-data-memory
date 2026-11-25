@@ -9,11 +9,14 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from app.agent import (
     AgentError,
     AgentNotConfiguredError,
     AgentRecursionLimitError,
     BasicAgent,
+    _message_content_to_text,
     configure_default_checkpointer,
     get_agent,
 )
@@ -22,7 +25,7 @@ from app.persistence import (
     PostgresPersistenceManager,
     init_optional_checkpointer_from_env,
 )
-from app.schemas import QueryRequest, QueryResponse
+from app.schemas import QueryRequest, QueryResponse, ThreadHistoryResponse, ThreadMessage
 from app.streaming import sse_answer, sse_done, sse_error, sse_step, sse_trace
 
 logger = logging.getLogger(__name__)
@@ -187,3 +190,39 @@ def stream_agent(
                 yield sse_done()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get(
+    "/threads/{thread_id}",
+    response_model=ThreadHistoryResponse,
+    response_model_exclude_none=True,
+)
+def get_thread_history(
+    thread_id: str,
+    agent: BasicAgent = Depends(get_agent),
+) -> ThreadHistoryResponse:
+    state = agent.get_thread_state(thread_id)
+    if state is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation thread not found.",
+        )
+
+    messages: list[ThreadMessage] = []
+    for msg in state.get("messages") or []:
+        if isinstance(msg, HumanMessage):
+            messages.append(
+                ThreadMessage(role="user", content=_message_content_to_text(msg.content))
+            )
+        elif isinstance(msg, AIMessage):
+            messages.append(
+                ThreadMessage(role="assistant", content=_message_content_to_text(msg.content))
+            )
+
+    raw_evidence = state.get("evidence")
+    evidence = raw_evidence if isinstance(raw_evidence, list) else None
+    return ThreadHistoryResponse(
+        thread_id=thread_id.strip(),
+        messages=messages,
+        evidence=evidence,
+    )
