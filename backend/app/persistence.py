@@ -81,8 +81,8 @@ def create_connection_pool(
     resolved_min = min_size if min_size is not None else _parse_pool_int("POSTGRES_POOL_MIN_SIZE", DEFAULT_POOL_MIN_SIZE)
     resolved_max = max_size if max_size is not None else _parse_pool_int("POSTGRES_POOL_MAX_SIZE", DEFAULT_POOL_MAX_SIZE)
 
-    if resolved_min < 0:
-        raise PersistenceError(f"min_size must be >= 0, got {resolved_min}.")
+    if resolved_min < 1:
+        raise PersistenceError(f"min_size must be >= 1, got {resolved_min}.")
     if resolved_max < 1 or resolved_max < resolved_min:
         raise PersistenceError(
             f"max_size ({resolved_max}) must be >= 1 and >= min_size ({resolved_min})."
