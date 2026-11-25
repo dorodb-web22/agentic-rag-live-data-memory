@@ -21,13 +21,26 @@ def sse_step(node: str, status: str) -> str:
 
 
 def sse_trace(run_id: str | None) -> str | None:
-    """Return a trace SSE frame if LangSmith is configured, else None."""
+    """Return a trace SSE frame if LangSmith is configured and run exists, else None."""
     if os.getenv("LANGCHAIN_TRACING_V2", "").lower() != "true":
+        return None
+    api_key = os.getenv("LANGCHAIN_API_KEY", "").strip()
+    if not api_key:
         return None
     if not run_id or not run_id.strip():
         return None
-    url = f"https://smith.langchain.com/public/{run_id.strip()}/r"
-    return _sse("trace", {"url": url})
+
+    try:
+        import langsmith
+
+        client = langsmith.Client(api_key=api_key)
+        run = client.read_run(run_id.strip())
+        url = getattr(run, "url", None)
+        if not url:
+            return None
+        return _sse("trace", {"url": str(url)})
+    except Exception:
+        return None
 
 
 def sse_answer(answer: str, evidence: list[dict[str, Any]] | None, thread_id: str | None) -> str:

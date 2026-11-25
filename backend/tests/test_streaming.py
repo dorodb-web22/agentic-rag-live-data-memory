@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
@@ -96,26 +96,58 @@ def test_sse_done_format() -> None:
 
 def test_sse_trace_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
     assert sse_trace("some-run-id") is None
 
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "test-key")
+    assert sse_trace("some-run-id") is None
+
+    # Tracing is on, but API key is missing or blank
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    assert sse_trace("some-run-id") is None
+
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "   ")
     assert sse_trace("some-run-id") is None
 
 
 def test_sse_trace_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "test-api-key")
     monkeypatch.setenv("LANGCHAIN_PROJECT", "agentic-rag-test")
 
     assert sse_trace(None) is None
+    assert sse_trace("   ") is None
 
-    frame = sse_trace("test-run-uuid-123")
-    assert frame is not None
-    assert frame.startswith("event: trace\r\n")
-    events = _parse_sse_events(frame)
-    assert len(events) == 1
-    event_type, data = events[0]
-    assert event_type == "trace"
-    assert data["url"] == "https://smith.langchain.com/public/test-run-uuid-123/r"
+    with patch("langsmith.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_run = MagicMock()
+        mock_run.url = "https://smith.langchain.com/o/org/projects/p/runs/test-run-uuid-123"
+        mock_client.read_run.return_value = mock_run
+        mock_client_cls.return_value = mock_client
+
+        frame = sse_trace("test-run-uuid-123")
+        assert frame is not None
+        assert frame.startswith("event: trace\r\n")
+        events = _parse_sse_events(frame)
+        assert len(events) == 1
+        event_type, data = events[0]
+        assert event_type == "trace"
+        assert data["url"] == "https://smith.langchain.com/o/org/projects/p/runs/test-run-uuid-123"
+        assert "/public/" not in data["url"]
+
+
+def test_sse_trace_when_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "test-api-key")
+
+    with patch("langsmith.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.read_run.side_effect = RuntimeError("Network timeout or run not found")
+        mock_client_cls.return_value = mock_client
+
+        assert sse_trace("test-run-uuid-123") is None
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +257,26 @@ def test_sse_done_is_always_last_on_exception() -> None:
 def test_stream_endpoint_without_langsmith_emits_no_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Case 1: Tracing disabled
     monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
     stub = StubStreamingAgent(run_id="run-1234")
     app.dependency_overrides[get_agent] = lambda: stub
     try:
         response = client.post("/query/stream", json={"query": "Hello without trace"})
+        events = _parse_sse_events(response.text)
+        event_names = [e[0] for e in events]
+        assert "trace" not in event_names
+    finally:
+        app.dependency_overrides.clear()
+
+    # Case 2: Tracing enabled, but API key missing
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    stub = StubStreamingAgent(run_id="run-1234")
+    app.dependency_overrides[get_agent] = lambda: stub
+    try:
+        response = client.post("/query/stream", json={"query": "Hello without key"})
         events = _parse_sse_events(response.text)
         event_names = [e[0] for e in events]
         assert "trace" not in event_names
@@ -241,17 +288,50 @@ def test_stream_endpoint_with_langsmith_emits_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "test-api-key")
     monkeypatch.setenv("LANGCHAIN_PROJECT", "agentic-rag-test")
 
     stub = StubStreamingAgent(run_id="run-5678")
     app.dependency_overrides[get_agent] = lambda: stub
     try:
-        response = client.post("/query/stream", json={"query": "Hello with trace"})
-        events = _parse_sse_events(response.text)
-        event_names = [e[0] for e in events]
-        assert "trace" in event_names
-        trace_event = next(e for e in events if e[0] == "trace")
-        assert "smith.langchain.com/public/run-5678/r" in trace_event[1]["url"]
+        with patch("langsmith.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_run = MagicMock()
+            mock_run.url = "https://smith.langchain.com/o/org/projects/p/runs/run-5678"
+            mock_client.read_run.return_value = mock_run
+            mock_client_cls.return_value = mock_client
+
+            response = client.post("/query/stream", json={"query": "Hello with trace"})
+            events = _parse_sse_events(response.text)
+            event_names = [e[0] for e in events]
+            assert "trace" in event_names
+            trace_event = next(e for e in events if e[0] == "trace")
+            assert trace_event[1]["url"] == "https://smith.langchain.com/o/org/projects/p/runs/run-5678"
+            assert "/public/" not in trace_event[1]["url"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stream_endpoint_with_langsmith_lookup_failure_skips_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGCHAIN_API_KEY", "test-api-key")
+
+    stub = StubStreamingAgent(run_id="run-5678")
+    app.dependency_overrides[get_agent] = lambda: stub
+    try:
+        with patch("langsmith.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.read_run.side_effect = RuntimeError("LangSmith API lookup failed")
+            mock_client_cls.return_value = mock_client
+
+            response = client.post("/query/stream", json={"query": "Hello with trace failure"})
+            events = _parse_sse_events(response.text)
+            event_names = [e[0] for e in events]
+            assert "trace" not in event_names
+            assert "answer" in event_names
+            assert "done" in event_names
     finally:
         app.dependency_overrides.clear()
 
