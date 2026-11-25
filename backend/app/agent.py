@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 
@@ -325,6 +326,7 @@ class BasicAgent:
         self._mcp_client = mcp_client
         self._checkpointer = checkpointer
         self.last_thread_id: str | None = None
+        self.last_run_id: str | None = None
 
     @property
     def checkpointer(self) -> BaseCheckpointSaver | None:
@@ -396,6 +398,86 @@ class BasicAgent:
 
         evidence = result.get("evidence")
         return result["answer"], evidence
+
+    def stream_with_evidence(
+        self,
+        query: str,
+        thread_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield dicts: {"event": "step"|"answer"|"error"|"done", "data": {...}}
+
+        Uses graph.stream() to get per-node updates.
+        """
+        cleaned_thread_id = (
+            thread_id.strip()
+            if isinstance(thread_id, str) and thread_id.strip()
+            else None
+        )
+        active_checkpointer = self.checkpointer
+        resolved_thread_id = (
+            cleaned_thread_id
+            if cleaned_thread_id is not None
+            else (str(uuid.uuid4()) if active_checkpointer is not None else None)
+        )
+        self.last_thread_id = resolved_thread_id
+
+        run_id = str(uuid.uuid4())
+        self.last_run_id = run_id
+
+        config: dict[str, Any] = {}
+        if resolved_thread_id is not None:
+            config["configurable"] = {"thread_id": resolved_thread_id}
+        config["run_id"] = run_id
+
+        try:
+            if self._graph is None:
+                self._graph = create_agent_graph(
+                    mcp_client=self._mcp_client,
+                    checkpointer=active_checkpointer,
+                )
+
+            final_state: dict[str, Any] = {}
+            try:
+                stream_iter = self._graph.stream({"query": query}, config, stream_mode="updates")
+            except TypeError as exc:
+                if "config" not in str(exc) and "argument" not in str(exc) and "stream_mode" not in str(exc):
+                    raise
+                try:
+                    stream_iter = self._graph.stream({"query": query}, stream_mode="updates")
+                except TypeError:
+                    stream_iter = self._graph.stream({"query": query})
+
+            for chunk in stream_iter:
+                if isinstance(chunk, dict):
+                    for node_name, node_output in chunk.items():
+                        if isinstance(node_output, dict):
+                            final_state.update(node_output)
+                        yield {"event": "step", "data": {"node": node_name, "status": "end"}}
+
+            # After stream completes, extract final state for answer + evidence
+            if hasattr(self._graph, "get_state"):
+                try:
+                    state_snapshot = self._graph.get_state(config)
+                    if state_snapshot and getattr(state_snapshot, "values", None):
+                        final_state = dict(state_snapshot.values)
+                except Exception:
+                    pass
+
+            raw_answer = final_state.get("answer")
+            answer_text = raw_answer if isinstance(raw_answer, str) else ""
+            yield {
+                "event": "answer",
+                "data": {
+                    "answer": answer_text,
+                    "evidence": final_state.get("evidence"),
+                    "thread_id": resolved_thread_id,
+                },
+            }
+        except Exception as exc:
+            logger.exception("Agent stream execution failed: %s", exc)
+            yield {"event": "error", "data": {"message": str(exc)}}
+        finally:
+            yield {"event": "done", "data": {}}
 
     def get_thread_state(self, thread_id: str) -> dict[str, Any] | None:
         """Retrieve the latest checkpoint state values for a given thread_id."""
