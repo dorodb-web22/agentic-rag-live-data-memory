@@ -23,8 +23,8 @@
   {
     "id": "q04",
     "category": "comparison",
-    "input": "Compare the prices of all products in our catalog.",
-    "expected_ids": [1, 2, 3, 4, 5],
+    "input": "Compare the prices of the Starter and Professional plans.",
+    "expected_ids": [1, 2],
     "expect_retrieval": true
   },
   {

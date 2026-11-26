@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DATASET_PATH = Path(__file__).resolve().parent / "dataset.json"
 DEFAULT_RESULTS_PATH = Path(__file__).resolve().parent / "results.json"
-DEFAULT_JUDGE_MODEL = os.getenv("DEEPEVAL_JUDGE_MODEL", "gpt-4o-mini")
+DEFAULT_JUDGE_MODEL = "gpt-4o-mini"  # resolved at runtime via os.getenv in run_evaluation()
 DEFAULT_THRESHOLD = 0.8
 
 
@@ -60,9 +60,12 @@ def check_citations(
     valid_keys: set[str] = set()
     for idx, record in enumerate(evidence):
         if isinstance(record, dict):
-            if "id" in record:
-                valid_keys.add(f"Product-{record['id']}")
-            valid_keys.add(f"Product-row{idx}")
+            raw_id = record.get("id")
+            # Mirror _build_citation_index: Product-{id} when id present, else Product-row{idx}
+            if raw_id is not None:
+                valid_keys.add(f"Product-{raw_id}")
+            else:
+                valid_keys.add(f"Product-row{idx}")
 
     fabricated = [c for c in citations if c not in valid_keys]
     return len(fabricated) == 0, fabricated
@@ -124,7 +127,10 @@ def check_deterministic(
             return False, f"Missing expected IDs {expected_ids}; retrieved: {retrieved_ids}"
         return True, "Deterministic retrieval checks passed"
 
-    # Rule 5: Queries not expecting retrieval (e.g. adversarial SQL injections)
+    # Rule 5: Queries not expecting retrieval (e.g. adversarial SQL injections with expect_retrieval=False)
+    # Verify evidence is None or [] — the agent must not have returned data it shouldn't have.
+    if evidence not in (None, []):
+        return False, f"Expected no evidence (expect_retrieval=False), but got {evidence}"
     return True, "Deterministic checks passed"
 
 
@@ -211,8 +217,8 @@ def run_case(
     )
     _, fabricated = check_citations(answer, evidence)
 
-    # Faithfulness check: run DeepEval judge when retrieval context exists
-    if expect_retrieval and evidence:
+    # Faithfulness check: run DeepEval judge whenever retrieval context is non-empty
+    if evidence:
         try:
             score, reason, faith_passed = evaluate_faithfulness_with_deepeval(
                 input_query=input_query,
@@ -226,8 +232,8 @@ def run_case(
             reason = f"Faithfulness evaluation error: {type(exc).__name__}: {exc}"
             faith_passed = False
     else:
-        # Cases with no retrieval context (general / no_match) rely on deterministic ground truth
-        score = 1.0 if det_passed else 0.0
+        # No retrieval context (general / no_match / adversarial with no rows) — deterministic only
+        score = None  # not judged; excluded from mean_faithfulness
         reason = f"Skipped LLM judge (no retrieval context): {det_reason}"
         faith_passed = det_passed
 
@@ -253,13 +259,16 @@ def run_case(
 def run_evaluation(
     dataset_path: str | Path | None = None,
     results_path: str | Path | None = None,
-    judge_model: str = DEFAULT_JUDGE_MODEL,
+    judge_model: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
     agent: Any = None,
 ) -> dict[str, Any]:
     """Run the complete evaluation suite against the dataset."""
     from app.agent import BasicAgent
     from app.db_setup import init_demo_database
+
+    # Resolve judge model at runtime so env vars set after import are honoured
+    resolved_judge_model = judge_model or os.getenv("DEEPEVAL_JUDGE_MODEL", DEFAULT_JUDGE_MODEL)
 
     init_demo_database()
 
@@ -270,23 +279,27 @@ def run_evaluation(
     case_results: list[dict[str, Any]] = []
 
     print("\n" + "=" * 80)
-    print(f"Running Faithfulness Evaluation ({len(cases)} cases) | Judge: {judge_model} | Threshold: {threshold}")
+    print(f"Running Faithfulness Evaluation ({len(cases)} cases) | Judge: {resolved_judge_model} | Threshold: {threshold}")
     print("=" * 80)
 
     for case in cases:
         print(f"Evaluating {case['id']} [{case['category']}]...", end=" ", flush=True)
-        res = run_case(agent=agent, case=case, judge_model=judge_model, threshold=threshold)
+        res = run_case(agent=agent, case=case, judge_model=resolved_judge_model, threshold=threshold)
         status_str = "PASS" if res["passed"] else "FAIL"
-        print(f"[{status_str}] (score: {res['faithfulness_score']})")
+        score_display = f"{res['faithfulness_score']:.3f}" if res["faithfulness_score"] is not None else "skipped"
+        print(f"[{status_str}] (score: {score_display})")
         case_results.append(res)
 
     total_cases = len(case_results)
     passed_cases = sum(1 for c in case_results if c["passed"])
     failed_cases = total_cases - passed_cases
     pass_rate = round(passed_cases / total_cases, 3) if total_cases > 0 else 0.0
+
+    # mean_faithfulness: average only over cases that were actually judged (score is not None)
+    judged = [c for c in case_results if c["faithfulness_score"] is not None]
     mean_faithfulness = (
-        round(sum(c["faithfulness_score"] for c in case_results) / total_cases, 3)
-        if total_cases > 0
+        round(sum(c["faithfulness_score"] for c in judged) / len(judged), 3)
+        if judged
         else 0.0
     )
     fabricated_count = sum(len(c["fabricated_citations"]) for c in case_results)
@@ -297,9 +310,10 @@ def run_evaluation(
         "failed": failed_cases,
         "pass_rate": pass_rate,
         "mean_faithfulness": mean_faithfulness,
+        "judged_cases": len(judged),
         "fabricated_citations_count": fabricated_count,
         "threshold": threshold,
-        "judge_model": judge_model,
+        "judge_model": resolved_judge_model,
     }
 
     full_output = {
@@ -320,7 +334,7 @@ def run_evaluation(
     print(f"Passed:                      {passed_cases}")
     print(f"Failed:                      {failed_cases}")
     print(f"Pass Rate:                   {pass_rate * 100:.1f}%")
-    print(f"Mean Faithfulness:           {mean_faithfulness:.3f} (target >= {threshold})")
+    print(f"Mean Faithfulness:           {mean_faithfulness:.3f} (target >= {threshold}, over {len(judged)} judged cases)")
     print(f"Fabricated Citations:        {fabricated_count} (must be 0)")
     print(f"Results File:                {out_path}")
     print("=" * 80 + "\n")
@@ -332,7 +346,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run DeepEval faithfulness evaluation.")
     parser.add_argument("--dataset", type=str, default=str(DEFAULT_DATASET_PATH), help="Path to dataset.json")
     parser.add_argument("--results", type=str, default=str(DEFAULT_RESULTS_PATH), help="Path to write results.json")
-    parser.add_argument("--model", type=str, default=DEFAULT_JUDGE_MODEL, help="Judge model name")
+    parser.add_argument("--model", type=str, default=None, help="Judge model name (overrides DEEPEVAL_JUDGE_MODEL env var)")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Faithfulness threshold (default: 0.8)")
     args = parser.parse_args()
 
