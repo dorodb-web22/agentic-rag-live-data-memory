@@ -370,6 +370,8 @@ const GOOGLE_CLIENT_ID = "276959651113-nulj1hlumsq72919fmdt5c9gr6b1sglc.apps.goo
 // Local dev override: set window.LOCAL_API_BASE = "http://localhost:8000" in browser console.
 const API_BASE        = window.LOCAL_API_BASE || (location.hostname === "localhost" ? "http://localhost:8000" : "");
 const AUTH_ENDPOINT   = API_BASE + "/api/auth/google";                // unified FastAPI /api prefix
+const ME_ENDPOINT     = API_BASE + "/api/auth/me";                    // server session check
+const LOGOUT_ENDPOINT = API_BASE + "/api/auth/logout";
 const APP_URL         = API_BASE ? API_BASE.replace(/:\d+$/, ":5173") : "/app"; // local → Vite; prod → /app
 const REQUIRE_BACKEND = true;                                         // always verify server-side
 /* ======================================== */
@@ -387,37 +389,69 @@ function render(){
 }
 function jwt(t){const p=t.split(".")[1].replace(/-/g,"+").replace(/_/g,"/");return JSON.parse(decodeURIComponent(escape(atob(p))))}
 
+/* Sync localStorage UI state with real server httpOnly session cookie so stale
+   localStorage never causes a /app -> /api/auth/me (401) -> landing redirect loop. */
+async function syncServerSession(){
+  try{
+    const r=await fetch(ME_ENDPOINT,{method:"GET",credentials:"include",headers:{"Accept":"application/json"}});
+    if(r.ok){
+      const me=await r.json();
+      localStorage.setItem(KEY,JSON.stringify({name:me.name,email:me.email,picture:me.picture}));
+      render();
+      return true;
+    }
+    if(r.status===401){
+      localStorage.removeItem(KEY);
+      render();
+      return false;
+    }
+  }catch(e){}
+  return !!getUser();
+}
+
 async function onCredential(res){
   err.textContent="";
   try{
-    /* 1. Ask your backend to verify the token. This is the real authentication step. */
+    /* 1. Ask your backend to verify the token and set the httpOnly session cookie. */
     let verified=null;
     try{
       const r=await fetch(AUTH_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({credential:res.credential})});
       if(r.ok) verified=await r.json();
     }catch(e){}
-    /* 2. Use the verified profile; fall back to the token's own claims while no backend is wired up. */
+    /* 2. Require verified backend session before redirecting to the dashboard. */
     if(!verified&&REQUIRE_BACKEND){err.textContent="Couldn’t verify your sign-in. Is the backend running?";return}
     const c=verified||jwt(res.credential);
     localStorage.setItem(KEY,JSON.stringify({name:c.name,email:c.email,picture:c.picture}));
     dlg.close(); render();
+    location.href=APP_URL;
   }catch(e){err.textContent="Sign-in failed. Please try again."}
 }
 
-function initGoogle(){
-  const ready=window.google&&google.accounts&&google.accounts.id&&!GOOGLE_CLIENT_ID.startsWith("YOUR_");
-  if(!ready){ $("#gfallback").style.display="flex"; return false }
+function initGoogle(attempt=0){
+  if(GOOGLE_CLIENT_ID.startsWith("YOUR_")){ $("#gfallback").style.display="flex"; return false }
+  const ready=window.google&&google.accounts&&google.accounts.id;
+  if(!ready){
+    if(attempt<30){ setTimeout(()=>initGoogle(attempt+1),100); return false }
+    $("#gfallback").style.display="flex";
+    return false;
+  }
+  $("#gfallback").style.display="none";
   if(!initGoogle.done){
+    $("#gbtn").innerHTML="";
     google.accounts.id.initialize({client_id:GOOGLE_CLIENT_ID,callback:onCredential,auto_select:false});
     google.accounts.id.renderButton($("#gbtn"),{theme:"outline",size:"large",shape:"pill",text:"continue_with",width:300});
     initGoogle.done=true;
   }
   return true;
 }
-function openSignin(){
-  if(getUser()){location.href=APP_URL;return}
+async function goToAppOrSignin(){
+  if(getUser()){
+    const ok=await syncServerSession();
+    if(ok){location.href=APP_URL;return}
+  }
   err.textContent=""; dlg.showModal(); initGoogle();
 }
+function openSignin(){ void goToAppOrSignin(); }
 $$("[data-signin]").forEach(b=>b.addEventListener("click",e=>{e.preventDefault();openSignin()}));
 $("#gfallback").addEventListener("click",()=>{err.textContent="Google sign-in isn’t configured yet. Add your client ID in the CONFIG block."});
 $("#dx").addEventListener("click",()=>dlg.close());
@@ -429,11 +463,31 @@ document.addEventListener("click",e=>{if(!menu.contains(e.target)&&!av.contains(
 $("#signOut").addEventListener("click",()=>{
   localStorage.removeItem(KEY); menu.classList.remove("on");
   try{google.accounts.id.disableAutoSelect()}catch(e){}
-  fetch(AUTH_ENDPOINT.replace(/google$/,"logout"),{method:"POST",credentials:"include"}).catch(()=>{});
+  fetch(LOGOUT_ENDPOINT,{method:"POST",credentials:"include"}).catch(()=>{});
   render();
 });
-$$('a[href="/app"]').forEach(a=>a.href=APP_URL);
+$$('a[href="/app"]').forEach(a=>{
+  a.href=APP_URL;
+  a.addEventListener("click",e=>{e.preventDefault();menu.classList.remove("on");void goToAppOrSignin()});
+});
 render();
+(async function bootAuth(){
+  const params=new URLSearchParams(location.search);
+  const wantSignin=params.get("signin")==="1";
+  if(wantSignin){
+    params.delete("signin");
+    const qs=params.toString();
+    history.replaceState(null,"",location.pathname+(qs?"?"+qs:"")+location.hash);
+  }
+  const ok=await syncServerSession();
+  if(wantSignin&&!ok){
+    err.textContent="";
+    dlg.showModal();
+    if(!initGoogle()){
+      window.addEventListener("load",()=>initGoogle(),{once:true});
+    }
+  }
+})();
 
 /* ===== MOTION ===== */
 (function(){
