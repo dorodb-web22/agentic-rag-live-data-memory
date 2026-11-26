@@ -51,7 +51,7 @@ def _compile_uuid_sqlite(_type: Any, _compiler: Any, **_kw: Any) -> str:
 
 
 from app.agent import BasicAgent, _scoped_checkpoint_thread_id, get_agent  # noqa: E402
-from app.db.models import Base, User, UserIntegration  # noqa: E402
+from app.db.models import Base, Conversation, ConversationTurn, User, UserIntegration  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.integrations.crypto import encrypt_tokens  # noqa: E402
 from app.integrations.github import GitHubConnector  # noqa: E402
@@ -154,7 +154,15 @@ def multitenant_env(tmp_path: Any) -> Any:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            User.__table__,
+            Conversation.__table__,
+            ConversationTurn.__table__,
+            UserIntegration.__table__,
+        ],
+    )
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
     user_a_id = str(uuid.uuid4())
