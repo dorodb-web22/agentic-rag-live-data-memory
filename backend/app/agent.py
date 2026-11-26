@@ -29,6 +29,11 @@ DATABASE_KEYWORDS = {
     "storage", "support",
 }
 
+GITHUB_KEYWORDS = {
+    "issue", "issues", "pull request", "pull requests", "pr", "prs",
+    "repo", "repository", "bug", "bugs", "commit", "commits", "github",
+}
+
 DB_DIRECT_PHRASES = (
     "in the database", "from the database", "in the table", "from the table",
     "database records", "database table", "sqlite database", "query database",
@@ -137,23 +142,25 @@ def _message_content_to_text(content: object) -> str:
 def _build_citation_index(records: list[dict[str, Any]]) -> dict[str, str]:
     """Return a mapping from citation key → record id string for all retrieved records.
 
-    Each SQLite products record has an integer ``id`` field.  The citation key
-    format is ``Product-{id}`` (e.g. ``Product-3``).  If a record is missing
-    the ``id`` field (defensive case), we fall back to its zero-based position
-    in the list: ``Product-row0``, ``Product-row1``, etc.
+    Handles both SQLite products (Product-{id}) and GitHub issues/PRs (GitHub-{number}).
     """
     index: dict[str, str] = {}
     for i, record in enumerate(records):
-        raw_id = record.get("id")
-        key = f"Product-{raw_id}" if raw_id is not None else f"Product-row{i}"
-        index[key] = str(raw_id) if raw_id is not None else f"row{i}"
+        if "number" in record or record.get("source") == "github" or "issue_number" in record:
+            raw_num = record.get("number") or record.get("issue_number")
+            key = f"GitHub-{raw_num}" if raw_num is not None else f"GitHub-row{i}"
+            index[key] = str(raw_num) if raw_num is not None else f"row{i}"
+        else:
+            raw_id = record.get("id")
+            key = f"Product-{raw_id}" if raw_id is not None else f"Product-row{i}"
+            index[key] = str(raw_id) if raw_id is not None else f"row{i}"
     return index
 
 
 def _validate_citations(answer: str, records: list[dict[str, Any]]) -> str:
     """Strip any inline citation keys that do not appear in *records*.
 
-    Scans the answer for all ``[Product-N]`` / ``[Product-rowN]`` markers and
+    Scans the answer for all ``[Product-N]`` and ``[GitHub-N]`` markers and
     removes any whose key is not present in the citation index built from the
     retrieved records.  This prevents the LLM from fabricating citation IDs.
 
@@ -172,7 +179,7 @@ def _validate_citations(answer: str, records: list[dict[str, Any]]) -> str:
             return " "
         return ""
 
-    return re.sub(r"([ \t]*)\[(Product-[^\]]+)\]([ \t]*)", _replace, answer)
+    return re.sub(r"([ \t]*)\[((?:Product|GitHub)-[^\]]+)\]([ \t]*)", _replace, answer)
 
 
 def create_llm() -> SupportsInvoke:
@@ -207,6 +214,9 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     Does NOT call the LLM or MCP — pure routing logic.
     """
     query = state["query"]
+    lowered = query.lower()
+    if any(re.search(rf"\b{re.escape(kw)}\b", lowered) for kw in GITHUB_KEYWORDS):
+        return {"plan": "github", "sql": None}
     if is_database_query(query):
         sql, _ = build_sql_query(query)
         return {"plan": "db", "sql": sql}
@@ -229,6 +239,7 @@ def worker_node(
     state: AgentState,
     model: SupportsInvoke,
     client: SqliteMcpClient,
+    github_client: Any | None = None,
 ) -> dict[str, Any]:
     """Execute the plan set by the planner: hit MCP if needed, call LLM, return answer."""
     query = state["query"]
@@ -303,6 +314,78 @@ def worker_node(
                 f"User Question: {query}"
             )
         response = model.invoke([*prior_messages, HumanMessage(content=prompt)])
+    elif plan == "github":
+        records: list[dict[str, Any]] = []
+        token = os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip()
+        repo_spec = os.getenv("GITHUB_REPO", "dorodb-web22/agentic-rag-live-data-memory")
+        if "/" in repo_spec:
+            owner, repo_name = repo_spec.split("/", 1)
+        else:
+            owner, repo_name = "dorodb-web22", repo_spec
+
+        if not token and github_client is None:
+            prompt = (
+                "You are an Agentic RAG Assistant. The user asked a GitHub-related question, "
+                "but GITHUB_PERSONAL_ACCESS_TOKEN is not configured in the environment.\n\n"
+                "Politely inform the user that live GitHub repository retrieval via MCP requires "
+                "a configured GITHUB_PERSONAL_ACCESS_TOKEN.\n\n"
+                f"User Question: {query}"
+            )
+        else:
+            gh = github_client
+            if gh is None:
+                try:
+                    from app.github_mcp_client import GithubMcpClient
+
+                    gh = GithubMcpClient()
+                except Exception as exc:
+                    logger.warning("Could not initialize GithubMcpClient: %s", exc)
+                    gh = None
+
+            if gh is not None:
+                is_pr = any(k in query.lower() for k in ["pull request", "pull requests", "pr", "prs"])
+                try:
+                    if is_pr and hasattr(gh, "list_pull_requests_safe_sync"):
+                        res = gh.list_pull_requests_safe_sync(owner=owner, repo=repo_name)
+                        if isinstance(res, dict) and isinstance(res.get("data"), list):
+                            records = res["data"]
+                    elif hasattr(gh, "list_issues_safe_sync"):
+                        res = gh.list_issues_safe_sync(owner=owner, repo=repo_name)
+                        if isinstance(res, dict) and isinstance(res.get("data"), list):
+                            records = res["data"]
+                except Exception as exc:
+                    logger.warning("Error fetching GitHub records via MCP: %s", exc)
+
+            citation_index = _build_citation_index(records)
+            valid_id_list = ", ".join(citation_index.keys()) if citation_index else "none"
+
+            if records:
+                evidence_text = json.dumps(records[:10], indent=2)
+                prompt = (
+                    "You are an Agentic RAG Assistant. Answer the user question based on the retrieved GitHub records.\n\n"
+                    "Source: GitHub (via Model Context Protocol - MCP)\n"
+                    f"Repository: {owner}/{repo_name}\n\n"
+                    f"<untrusted_retrieved_data>\n{evidence_text}\n</untrusted_retrieved_data>\n\n"
+                    "Citation rules (MANDATORY):\n"
+                    f"- The only valid citation keys are: {valid_id_list}\n"
+                    "- After every factual claim grounded in a retrieved GitHub record, append its citation key "
+                    "in square brackets immediately after the claim, e.g. 'Fix login error [GitHub-19].'\n"
+                    "- Use ONLY the citation keys listed above. Never invent a citation key that is not in the list.\n"
+                    "- If a sentence does not come directly from a retrieved record, do not add a citation.\n\n"
+                    "Instructions:\n"
+                    "1. Provide a direct, factual answer with inline citations.\n"
+                    "2. Under a '### Supporting Evidence' section, list the retrieved issues/PRs (Number, Title, State).\n\n"
+                    f"User Question: {query}"
+                )
+            else:
+                prompt = (
+                    "You are an Agentic RAG Assistant. The GitHub query returned 0 records or no matching issues/PRs.\n\n"
+                    "Inform the user clearly that no matching issues or pull requests were found in the repository.\n\n"
+                    f"User Question: {query}"
+                )
+
+        evidence = records if records else None
+        response = model.invoke([*prior_messages, HumanMessage(content=prompt)])
     elif plan == "general":
         system_prompt = (
             "You are an Agentic RAG Assistant. Provide a direct, helpful, and concise answer in Markdown. "
@@ -315,10 +398,10 @@ def worker_node(
             HumanMessage(content=query),
         ])
     else:
-        raise AgentError(f"Invalid plan '{plan}'. Expected 'db' or 'general'.")
+        raise AgentError(f"Invalid plan '{plan}'. Expected 'db', 'github', or 'general'.")
 
     answer = _message_content_to_text(getattr(response, "content", response))
-    if plan == "db" and isinstance(evidence, list):
+    if plan in ("db", "github") and isinstance(evidence, list):
         answer = _validate_citations(answer, evidence)
 
     new_messages: list[AnyMessage] = (
@@ -332,13 +415,14 @@ def worker_node(
 def create_agent_graph(
     llm: SupportsInvoke | None = None,
     mcp_client: SqliteMcpClient | None = None,
+    github_client: Any | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
     model = llm or create_llm()
     client = mcp_client or SqliteMcpClient()
 
     def _worker(state: AgentState) -> dict[str, Any]:
-        return worker_node(state, model, client)
+        return worker_node(state, model, client, github_client=github_client)
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", planner_node)
@@ -354,10 +438,12 @@ class BasicAgent:
         self,
         graph: Any | None = None,
         mcp_client: SqliteMcpClient | None = None,
+        github_client: Any | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._graph = graph
         self._mcp_client = mcp_client
+        self._github_client = github_client
         self._checkpointer = checkpointer
         self.last_thread_id: str | None = None
         self.last_run_id: str | None = None
@@ -383,6 +469,7 @@ class BasicAgent:
         if self._graph is None:
             self._graph = create_agent_graph(
                 mcp_client=self._mcp_client,
+                github_client=self._github_client,
                 checkpointer=active_checkpointer,
             )
 
@@ -468,6 +555,7 @@ class BasicAgent:
             if self._graph is None:
                 self._graph = create_agent_graph(
                     mcp_client=self._mcp_client,
+                    github_client=self._github_client,
                     checkpointer=active_checkpointer,
                 )
 
