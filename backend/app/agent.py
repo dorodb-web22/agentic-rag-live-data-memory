@@ -398,8 +398,14 @@ async def get_user_connectors(user_id: str, db: Any | None = None) -> list[Any]:
 
     sig = inspect.signature(resolver)
     params = list(sig.parameters.keys())
-    if len(params) >= 2 and params[0] in ("db", "session") and db is not None:
+    if len(params) >= 2 and params[0] in ("db", "session"):
+        if db is None:
+            return []
         res = resolver(db, user_id)
+    elif len(params) >= 2 and params[1] in ("db", "session"):
+        if db is None and sig.parameters[params[1]].default is inspect.Parameter.empty:
+            return []
+        res = resolver(user_id, db)
     elif "db" in sig.parameters and db is not None:
         res = resolver(user_id, db=db)
     elif "session" in sig.parameters and db is not None:
@@ -485,9 +491,9 @@ def _adapt_connectors_to_tools(raw_connectors: list[Any]) -> list[BaseTool]:
                 _add(_wrap_connector_callable(t_name, t_desc, fn))
                 continue
 
-        # Object with .provider and .search / .query / .execute
+        # Object with .provider and .fetch / .search / .query / .execute (matches BaseConnector.fetch)
         provider_attr = getattr(item, "provider", None) or getattr(item, "name", None)
-        for method_name in ("search", "query", "execute", "run"):
+        for method_name in ("fetch", "search", "query", "execute", "run"):
             method = getattr(item, method_name, None)
             if callable(method):
                 prov = str(provider_attr or "source").lower()

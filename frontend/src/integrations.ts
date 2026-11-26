@@ -124,7 +124,7 @@ export async function updateIntegrationConfig(
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({ config, ...config }),
+    body: JSON.stringify({ config }),
   });
   if (response.status === 401) throw new UnauthorizedApiError();
   if (!response.ok) {

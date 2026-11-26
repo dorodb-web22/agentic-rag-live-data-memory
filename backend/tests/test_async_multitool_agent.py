@@ -125,118 +125,121 @@ def test_unified_citations_across_github_gmail_notion_and_sqlite() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_parallel_multitool_fanout_executes_concurrently_and_merges_evidence() -> None:
-    async def search_gmail(query: str) -> list[dict[str, Any]]:
-        await asyncio.sleep(0.08)
-        return [
-            {
-                "source": "gmail",
-                "citation_key": "Gmail-msg01",
-                "message_id": "msg01",
-                "subject": "Launch blocker: SSO redirect",
-                "sender": "lead@example.com",
-                "snippet": "SSO callback needs prod URL",
-                "url": "https://mail.google.com/mail/u/0/#inbox/msg01",
-            }
+def test_parallel_multitool_fanout_executes_concurrently_and_merges_evidence() -> None:
+    async def _run() -> None:
+        async def search_gmail(query: str) -> list[dict[str, Any]]:
+            await asyncio.sleep(0.08)
+            return [
+                {
+                    "source": "gmail",
+                    "citation_key": "Gmail-msg01",
+                    "message_id": "msg01",
+                    "subject": "Launch blocker: SSO redirect",
+                    "sender": "lead@example.com",
+                    "snippet": "SSO callback needs prod URL",
+                    "url": "https://mail.google.com/mail/u/0/#inbox/msg01",
+                }
+            ]
+
+        async def search_notion(query: str) -> list[dict[str, Any]]:
+            await asyncio.sleep(0.08)
+            return [
+                {
+                    "source": "notion",
+                    "citation_key": "Notion-pg99",
+                    "page_id": "pg99",
+                    "title": "Launch Readiness Doc",
+                    "excerpt": "SSO is P0 before GA",
+                    "url": "https://notion.so/pg99",
+                }
+            ]
+
+        async def search_github(query: str) -> list[dict[str, Any]]:
+            await asyncio.sleep(0.08)
+            return [
+                {
+                    "source": "github",
+                    "citation_key": "GitHub-108",
+                    "number": 108,
+                    "title": "Update production OAuth callback URL",
+                    "state": "open",
+                    "url": "https://github.com/org/repo/issues/108",
+                }
+            ]
+
+        user_tools = [
+            StructuredTool.from_function(coroutine=search_gmail, name="search_gmail", description="Search Gmail"),
+            StructuredTool.from_function(coroutine=search_notion, name="search_notion", description="Search Notion"),
+            StructuredTool.from_function(coroutine=search_github, name="search_github", description="Search GitHub"),
         ]
 
-    async def search_notion(query: str) -> list[dict[str, Any]]:
-        await asyncio.sleep(0.08)
-        return [
-            {
-                "source": "notion",
-                "citation_key": "Notion-pg99",
-                "page_id": "pg99",
-                "title": "Launch Readiness Doc",
-                "excerpt": "SSO is P0 before GA",
-                "url": "https://notion.so/pg99",
-            }
-        ]
-
-    async def search_github(query: str) -> list[dict[str, Any]]:
-        await asyncio.sleep(0.08)
-        return [
-            {
-                "source": "github",
-                "citation_key": "GitHub-108",
-                "number": 108,
-                "title": "Update production OAuth callback URL",
-                "state": "open",
-                "url": "https://github.com/org/repo/issues/108",
-            }
-        ]
-
-    user_tools = [
-        StructuredTool.from_function(coroutine=search_gmail, name="search_gmail", description="Search Gmail"),
-        StructuredTool.from_function(coroutine=search_notion, name="search_notion", description="Search Notion"),
-        StructuredTool.from_function(coroutine=search_github, name="search_github", description="Search GitHub"),
-    ]
-
-    llm = ScriptedToolCallingLLM(
-        [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"id": "tc-1", "name": "search_gmail", "args": {"query": "launch blocker"}},
-                    {"id": "tc-2", "name": "search_notion", "args": {"query": "launch blocker"}},
-                    {"id": "tc-3", "name": "search_github", "args": {"query": "SSO callback"}},
-                ],
-            ),
-            AIMessage(
-                content=(
-                    "SSO callback is flagged in Gmail [Gmail-msg01], Notion [Notion-pg99], "
-                    "and tracked in [GitHub-108] (not [GitHub-999])."
-                )
-            ),
-        ]
-    )
-
-    user_id = str(uuid.uuid4())
-    saver = InMemorySaver()
-    agent = BasicAgent(llm=llm, async_checkpointer=saver)
-
-    with patch("app.agent.get_user_connectors", new_callable=AsyncMock, return_value=user_tools) as mock_conn:
-        t0 = time.perf_counter()
-        answer, evidence = await agent.aquery_with_evidence(
-            "Check my Gmail and Notion for launch blockers and cross-check open GitHub issues",
-            thread_id="thread-fanout-1",
-            user_id=user_id,
+        llm = ScriptedToolCallingLLM(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "tc-1", "name": "search_gmail", "args": {"query": "launch blocker"}},
+                        {"id": "tc-2", "name": "search_notion", "args": {"query": "launch blocker"}},
+                        {"id": "tc-3", "name": "search_github", "args": {"query": "SSO callback"}},
+                    ],
+                ),
+                AIMessage(
+                    content=(
+                        "SSO callback is flagged in Gmail [Gmail-msg01], Notion [Notion-pg99], "
+                        "and tracked in [GitHub-108] (not [GitHub-999])."
+                    )
+                ),
+            ]
         )
-        elapsed = time.perf_counter() - t0
 
-    mock_conn.assert_awaited_once_with(user_id, db=None)
-    assert llm.bound_tool_names == ["search_gmail", "search_notion", "search_github"]
-    # 3 x 0.08s sequential would be >= 0.24s; parallel asyncio.gather completes well under 0.20s
-    assert elapsed < 0.21, f"Expected parallel fan-out, took {elapsed:.3f}s"
+        user_id = str(uuid.uuid4())
+        saver = InMemorySaver()
+        agent = BasicAgent(llm=llm, async_checkpointer=saver)
 
-    assert "[Gmail-msg01]" in answer
-    assert "[Notion-pg99]" in answer
-    assert "[GitHub-108]" in answer
-    assert "[GitHub-999]" not in answer
-    assert evidence is not None and len(evidence) == 3
+        with patch("app.agent.get_user_connectors", new_callable=AsyncMock, return_value=user_tools) as mock_conn:
+            t0 = time.perf_counter()
+            answer, evidence = await agent.aquery_with_evidence(
+                "Check my Gmail and Notion for launch blockers and cross-check open GitHub issues",
+                thread_id="thread-fanout-1",
+                user_id=user_id,
+            )
+            elapsed = time.perf_counter() - t0
+
+        mock_conn.assert_awaited_once_with(user_id, db=None)
+        assert llm.bound_tool_names == ["search_gmail", "search_notion", "search_github"]
+        assert elapsed < 0.21, f"Expected parallel fan-out, took {elapsed:.3f}s"
+
+        assert "[Gmail-msg01]" in answer
+        assert "[Notion-pg99]" in answer
+        assert "[GitHub-108]" in answer
+        assert "[GitHub-999]" not in answer
+        assert evidence is not None and len(evidence) == 3
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_dynamic_agent_enforces_recursion_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dynamic_agent_enforces_recursion_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "4")
 
-    async def noop_tool(query: str) -> list[dict[str, Any]]:
-        return []
+    async def _run() -> None:
+        async def noop_tool(query: str) -> list[dict[str, Any]]:
+            return []
 
-    tool = StructuredTool.from_function(coroutine=noop_tool, name="search_github", description="Search")
-    looping_msg = AIMessage(
-        content="",
-        tool_calls=[{"id": "loop-1", "name": "search_github", "args": {"query": "forever"}}],
-    )
-    llm = ScriptedToolCallingLLM([looping_msg] * 10)
-    graph = create_dynamic_tool_agent_graph(llm=llm, tools=[tool])
-    agent = BasicAgent(llm=llm)
+        tool = StructuredTool.from_function(coroutine=noop_tool, name="search_github", description="Search")
+        looping_msg = AIMessage(
+            content="",
+            tool_calls=[{"id": "loop-1", "name": "search_github", "args": {"query": "forever"}}],
+        )
+        llm = ScriptedToolCallingLLM([looping_msg] * 10)
+        graph = create_dynamic_tool_agent_graph(llm=llm, tools=[tool])
+        agent = BasicAgent(llm=llm)
 
-    with patch("app.agent.get_user_connectors", new_callable=AsyncMock, return_value=[tool]):
-        with pytest.raises(AgentRecursionLimitError):
-            await agent.aquery_with_evidence("Loop test", user_id="u-loop")
-    assert graph is not None
+        with patch("app.agent.get_user_connectors", new_callable=AsyncMock, return_value=[tool]):
+            with pytest.raises(AgentRecursionLimitError):
+                await agent.aquery_with_evidence("Loop test", user_id="u-loop")
+        assert graph is not None
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -349,47 +352,48 @@ def test_api_query_stream_emits_keepalive_frames(monkeypatch: pytest.MonkeyPatch
         app.dependency_overrides.clear()
 
 
-@pytest.mark.asyncio
-async def test_api_query_stream_cancels_inflight_task_on_disconnect() -> None:
+def test_api_query_stream_cancels_inflight_task_on_disconnect() -> None:
     from app.main import api_stream_agent
     from app.schemas import QueryRequest
 
-    cancelled_flag = asyncio.Event()
+    async def _run() -> None:
+        cancelled_flag = asyncio.Event()
 
-    class CancellableAgent:
-        last_run_id = None
+        class CancellableAgent:
+            last_run_id = None
 
-        async def astream_with_evidence(self, query: str, thread_id: str | None = None, **kwargs: Any):
-            try:
-                yield {"event": "step", "data": {"node": "planner", "status": "start"}}
-                await asyncio.sleep(10.0)
-            except asyncio.CancelledError:
-                cancelled_flag.set()
-                raise
+            async def astream_with_evidence(self, query: str, thread_id: str | None = None, **kwargs: Any):
+                try:
+                    yield {"event": "step", "data": {"node": "planner", "status": "start"}}
+                    await asyncio.sleep(10.0)
+                except asyncio.CancelledError:
+                    cancelled_flag.set()
+                    raise
 
-    fake_request = MagicMock()
-    disconnect_state = {"disconnected": False}
+        fake_request = MagicMock()
+        disconnect_state = {"disconnected": False}
 
-    async def is_disconnected() -> bool:
-        return disconnect_state["disconnected"]
+        async def is_disconnected() -> bool:
+            return disconnect_state["disconnected"]
 
-    fake_request.is_disconnected = is_disconnected
-    mock_db = AsyncMock()
+        fake_request.is_disconnected = is_disconnected
+        mock_db = AsyncMock()
 
-    response = await api_stream_agent(
-        payload=QueryRequest(query="cancel me", thread_id="tid-cancel"),
-        raw_request=fake_request,
-        user={"user_id": str(uuid.uuid4())},
-        db=mock_db,
-        agent=CancellableAgent(),  # type: ignore[arg-type]
-    )
+        response = await api_stream_agent(
+            payload=QueryRequest(query="cancel me", thread_id="tid-cancel"),
+            raw_request=fake_request,
+            user={"user_id": str(uuid.uuid4())},
+            db=mock_db,
+            agent=CancellableAgent(),  # type: ignore[arg-type]
+        )
 
-    body_iter = response.body_iterator
-    first_chunk = await anext(body_iter)
-    assert "planner" in str(first_chunk)
+        body_iter = response.body_iterator
+        first_chunk = await anext(body_iter)
+        assert "planner" in str(first_chunk)
 
-    # Simulate client disconnect
-    disconnect_state["disconnected"] = True
-    remaining = [chunk async for chunk in body_iter]
-    assert remaining == []
-    assert cancelled_flag.is_set()
+        disconnect_state["disconnected"] = True
+        remaining = [chunk async for chunk in body_iter]
+        assert remaining == []
+        assert cancelled_flag.is_set()
+
+    asyncio.run(_run())
