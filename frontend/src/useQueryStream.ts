@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  clearConversations,
   deleteConversation,
   deriveTitle,
   loadActiveUser,
@@ -349,6 +350,12 @@ export function useQueryStream() {
     [reset],
   );
 
+  const clearAllConversations = useCallback(() => {
+    clearConversations(activeUserRef.current);
+    setConversations([]);
+    reset();
+  }, [reset]);
+
   const switchUser = useCallback(
     (nextHandle: string) => {
       const normalized = saveActiveUser(nextHandle);
@@ -368,6 +375,7 @@ export function useQueryStream() {
     activeConversationId,
     selectConversation,
     removeConversation,
+    clearAllConversations,
     messages,
     evidence,
     steps,
