@@ -191,7 +191,22 @@ class DynamicAgentState(TypedDict):
     scratch_messages: NotRequired[list[AnyMessage]]
     evidence: NotRequired[list[dict[str, Any]] | None]
     tool_errors: NotRequired[list[str]]
+    tool_warnings: NotRequired[list[dict[str, str]]]
     answer: NotRequired[str | None]
+
+
+def _infer_provider_from_tool_name(tool_name: str) -> str:
+    lowered = tool_name.lower()
+    if "github" in lowered:
+        return "github"
+    if "gmail" in lowered or "email" in lowered:
+        return "gmail"
+    if "notion" in lowered:
+        return "notion"
+    if "sql" in lowered or "db" in lowered:
+        return "sqlite"
+    cleaned = re.sub(r"^(?:fetch|search|query|execute|run)_+", "", lowered).strip("_")
+    return cleaned or "connector"
 
 
 def _message_content_to_text(content: object) -> str:
@@ -616,6 +631,7 @@ def create_dynamic_tool_agent_graph(
         scratch = list(state.get("scratch_messages") or [])
         evidence = state.get("evidence")
         tool_errors = list(state.get("tool_errors") or [])
+        tool_warnings = list(state.get("tool_warnings") or [])
 
         if not scratch:
             # First step of this turn: seed from prior persisted conversation history
@@ -627,6 +643,7 @@ def create_dynamic_tool_agent_graph(
             ]
             evidence = None
             tool_errors = []
+            tool_warnings = []
 
         response = await _ainvoke_model(bound_model, scratch)
         ai_msg = (
@@ -638,6 +655,7 @@ def create_dynamic_tool_agent_graph(
             "scratch_messages": [*scratch, ai_msg],
             "evidence": evidence,
             "tool_errors": tool_errors,
+            "tool_warnings": tool_warnings,
         }
 
     def _route_after_planner(state: DynamicAgentState) -> str:
@@ -654,11 +672,14 @@ def create_dynamic_tool_agent_graph(
         scratch = list(state.get("scratch_messages") or [])
         existing_evidence = list(state.get("evidence") or [])
         existing_errors = list(state.get("tool_errors") or [])
+        existing_warnings = list(state.get("tool_warnings") or [])
 
         last_msg = scratch[-1] if scratch else None
         raw_calls = list(getattr(last_msg, "tool_calls", None) or [])
 
-        async def _execute_single(call: dict[str, Any], offset: int) -> tuple[ToolMessage, list[dict[str, Any]], str | None]:
+        async def _execute_single(
+            call: dict[str, Any], offset: int
+        ) -> tuple[ToolMessage, list[dict[str, Any]], str | None, dict[str, str] | None]:
             call_id = str(call.get("id") or uuid.uuid4())
             t_name = str(call.get("name") or "")
             t_args = call.get("args") if isinstance(call.get("args"), dict) else {}
@@ -670,21 +691,32 @@ def create_dynamic_tool_agent_graph(
                     ToolMessage(content=f"[TOOL_NOT_CONNECTED] {err_msg}", tool_call_id=call_id, name=t_name),
                     [],
                     err_msg,
+                    {
+                        "tool": t_name,
+                        "provider": _infer_provider_from_tool_name(t_name),
+                        "message": err_msg,
+                    },
                 )
 
             try:
                 raw_result = await _ainvoke_tool(target_tool, t_args)
             except Exception as exc:
                 logger.warning("Connector tool '%s' failed: %s", t_name, exc)
-                err_text = f"{t_name}: {exc}"
+                detail_msg = str(exc).strip() or type(exc).__name__
+                err_text = f"{t_name}: {detail_msg}"
                 return (
                     ToolMessage(
-                        content=f"[CONNECTOR_ERROR] {t_name} failed: {exc}",
+                        content=f"[CONNECTOR_ERROR] {t_name} failed: {detail_msg}",
                         tool_call_id=call_id,
                         name=t_name,
                     ),
                     [],
                     err_text,
+                    {
+                        "tool": t_name,
+                        "provider": _infer_provider_from_tool_name(t_name),
+                        "message": detail_msg,
+                    },
                 )
 
             records = _normalize_tool_records(raw_result, t_name, starting_index=offset)
@@ -706,7 +738,7 @@ def create_dynamic_tool_agent_graph(
                     f"<untrusted_retrieved_data>\n{serialized}\n</untrusted_retrieved_data>"
                 )
 
-            return ToolMessage(content=content, tool_call_id=call_id, name=t_name), records, None
+            return ToolMessage(content=content, tool_call_id=call_id, name=t_name), records, None, None
 
         # Fan out all requested tool calls concurrently via asyncio.gather
         results = await asyncio.gather(
@@ -719,12 +751,15 @@ def create_dynamic_tool_agent_graph(
         new_tool_messages: list[ToolMessage] = []
         combined_evidence = list(existing_evidence)
         combined_errors = list(existing_errors)
+        combined_warnings = list(existing_warnings)
 
-        for tool_msg, recs, err in results:
+        for tool_msg, recs, err, warn_item in results:
             new_tool_messages.append(tool_msg)
             combined_evidence.extend(recs)
             if err:
                 combined_errors.append(err)
+            if warn_item:
+                combined_warnings.append(warn_item)
 
         # Re-index sequential fallback citation keys cleanly while preserving explicit ones
         for idx, rec in enumerate(combined_evidence):
@@ -735,6 +770,7 @@ def create_dynamic_tool_agent_graph(
             "scratch_messages": [*scratch, *new_tool_messages],
             "evidence": combined_evidence if combined_evidence else [],
             "tool_errors": combined_errors,
+            "tool_warnings": combined_warnings,
         }
 
     async def dynamic_worker_node(state: DynamicAgentState) -> dict[str, Any]:
@@ -742,6 +778,7 @@ def create_dynamic_tool_agent_graph(
         scratch = list(state.get("scratch_messages") or [])
         raw_evidence = state.get("evidence")
         records = list(raw_evidence) if isinstance(raw_evidence, list) else []
+        tool_warnings = list(state.get("tool_warnings") or [])
 
         if scratch and isinstance(scratch[-1], AIMessage):
             raw_answer = _message_content_to_text(scratch[-1].content)
@@ -765,6 +802,7 @@ def create_dynamic_tool_agent_graph(
         return {
             "answer": validated_answer,
             "evidence": final_evidence,
+            "tool_warnings": tool_warnings,
             "scratch_messages": [],
             "messages": persisted_turn,
         }
@@ -1050,6 +1088,7 @@ class BasicAgent:
         self._async_checkpointer = async_checkpointer
         self.last_thread_id: str | None = None
         self.last_run_id: str | None = None
+        self.last_tool_warnings: list[dict[str, str]] = []
 
     @property
     def checkpointer(self) -> BaseCheckpointSaver | None:
@@ -1105,6 +1144,7 @@ class BasicAgent:
         self.last_thread_id = resolved_thread_id
         run_id = str(uuid.uuid4())
         self.last_run_id = run_id
+        self.last_tool_warnings = []
 
         checkpoint_key = _scoped_checkpoint_thread_id(user_id, resolved_thread_id)
         config: dict[str, Any] = {
@@ -1133,6 +1173,7 @@ class BasicAgent:
         if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
             raise AgentError("Agent returned an invalid response.")
 
+        self.last_tool_warnings = list(result.get("tool_warnings") or [])
         return result["answer"], result.get("evidence")
 
     async def astream_with_evidence(
@@ -1159,6 +1200,7 @@ class BasicAgent:
         self.last_thread_id = resolved_thread_id
         run_id = str(uuid.uuid4())
         self.last_run_id = run_id
+        self.last_tool_warnings = []
 
         checkpoint_key = _scoped_checkpoint_thread_id(user_id, resolved_thread_id)
         config: dict[str, Any] = {
@@ -1198,14 +1240,19 @@ class BasicAgent:
 
             raw_answer = final_state.get("answer")
             answer_text = raw_answer if isinstance(raw_answer, str) else ""
+            warnings = list(final_state.get("tool_warnings") or [])
+            self.last_tool_warnings = warnings
+            answer_payload: dict[str, Any] = {
+                "answer": answer_text,
+                "evidence": final_state.get("evidence"),
+                "thread_id": resolved_thread_id,
+                "run_id": run_id,
+            }
+            if warnings:
+                answer_payload["warnings"] = warnings
             yield {
                 "event": "answer",
-                "data": {
-                    "answer": answer_text,
-                    "evidence": final_state.get("evidence"),
-                    "thread_id": resolved_thread_id,
-                    "run_id": run_id,
-                },
+                "data": answer_payload,
             }
         except asyncio.CancelledError:
             logger.info("Async stream cancelled due to client disconnect (thread=%s)", resolved_thread_id)

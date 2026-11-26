@@ -1,4 +1,4 @@
-import type { TraceStep } from './streaming';
+import type { ConnectorWarning, TraceStep } from './streaming';
 
 export type EvidenceRecord = {
   id?: number;
@@ -22,6 +22,7 @@ export type ChatMessage = {
   content: string;
   evidence?: EvidenceRecord[] | null;
   traceUrl?: string | null;
+  warnings?: ConnectorWarning[] | null;
   createdAt: string;
 };
 
@@ -63,6 +64,58 @@ export class UnauthorizedApiError extends Error {
     super(message);
     this.name = 'UnauthorizedApiError';
   }
+}
+
+export function parseRetryAfterSeconds(
+  headerValue: string | null | undefined,
+  fallbackSeconds = 15,
+): number {
+  if (!headerValue) return fallbackSeconds;
+  const trimmed = headerValue.trim();
+  if (!trimmed) return fallbackSeconds;
+  const asNum = Number(trimmed);
+  if (Number.isFinite(asNum) && asNum > 0) {
+    return Math.max(1, Math.min(300, Math.ceil(asNum)));
+  }
+  const asDate = Date.parse(trimmed);
+  if (Number.isFinite(asDate)) {
+    const deltaSecs = Math.ceil((asDate - Date.now()) / 1000);
+    if (deltaSecs > 0) {
+      return Math.max(1, Math.min(300, deltaSecs));
+    }
+  }
+  return fallbackSeconds;
+}
+
+export class RateLimitApiError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds = 15, detail?: string) {
+    const clamped = Math.max(1, Math.min(300, Math.round(retryAfterSeconds)));
+    super(
+      detail?.trim() ||
+        `Rate limit reached. Please wait ${clamped}s before sending another request.`,
+    );
+    this.name = 'RateLimitApiError';
+    this.retryAfterSeconds = clamped;
+  }
+}
+
+export async function buildRateLimitError(
+  response: Response,
+  fallbackSeconds = 15,
+): Promise<RateLimitApiError> {
+  const retrySecs = parseRetryAfterSeconds(response.headers.get('Retry-After'), fallbackSeconds);
+  let detail: string | undefined;
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === 'string' && body.detail.trim()) {
+      detail = body.detail.trim();
+    }
+  } catch {
+    /* ignore non-JSON 429 body */
+  }
+  return new RateLimitApiError(retrySecs, detail);
 }
 
 export function deriveTitle(firstQuery: string): string {
@@ -142,6 +195,7 @@ export async function fetchConversations(signal?: AbortSignal): Promise<SavedCon
     signal,
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok) {
     throw new Error(`Failed to load conversations (${response.status}).`);
   }
@@ -161,6 +215,7 @@ export async function fetchConversationDetail(
     signal,
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok) {
     throw new Error(`Failed to load conversation (${response.status}).`);
   }
@@ -175,6 +230,7 @@ export async function deleteConversationRemote(threadId: string): Promise<void> 
     headers: { Accept: 'application/json' },
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok && response.status !== 404) {
     throw new Error(`Failed to delete conversation (${response.status}).`);
   }

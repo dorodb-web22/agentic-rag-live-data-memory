@@ -228,4 +228,149 @@ describe('App — Auth Gate, Personalization & Server-Side History', () => {
       );
     });
   });
+
+  it('handles HTTP 429 rate limits with countdown banner and retries cleanly after cooldown', async () => {
+    let streamCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/me') {
+        return new Response(
+          JSON.stringify({ id: 'u1', name: 'Dorothy', email: 'dorothy@example.com', picture: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url === '/api/conversations') {
+        return new Response(JSON.stringify({ conversations: [] }), { status: 200 });
+      }
+      if (url === '/api/integrations') {
+        return new Response(JSON.stringify({ integrations: [] }), { status: 200 });
+      }
+      if (url === '/api/health/deep') {
+        return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+      }
+      if (url === '/api/query/stream') {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          return new Response(
+            JSON.stringify({ detail: 'Too many requests from this workspace.' }),
+            {
+              status: 429,
+              headers: {
+                'Content-Type': 'application/json',
+                'Retry-After': '1',
+              },
+            },
+          );
+        }
+        const sseBody =
+          'event: answer\r\ndata: {"answer":"Recovered answer [GitHub-42].","evidence":[{"source":"github","citation_key":"GitHub-42","number":42,"title":"Rate limit test"}],"thread_id":"t-retry"}\r\n\r\n' +
+          'event: done\r\ndata: {}\r\n\r\n';
+        return new Response(sseBody, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }
+      throw new Error(`Unhandled URL: ${url}`);
+    });
+
+    render(<App onNavigate={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Welcome, Dorothy!')).toBeTruthy();
+    });
+
+    const input = screen.getByLabelText('Ask a question');
+    fireEvent.change(input, { target: { value: 'Check open blockers' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('rate-limit-banner')).toBeTruthy();
+    });
+    expect(screen.getByTestId('rate-limit-banner').textContent).toContain(
+      'Too many requests from this workspace.',
+    );
+
+    // Wait ~1.1s for the 1s Retry-After countdown to finish
+    await waitFor(
+      () => {
+        expect(screen.getByTestId('rate-limit-countdown').textContent).toContain('Ready to retry');
+      },
+      { timeout: 2500 },
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Recovered answer/i)).toBeTruthy();
+    });
+    expect(screen.queryByTestId('rate-limit-banner')).toBeNull();
+  });
+
+  it('handles mid-session 401 expiration and renders partial connector failure warnings', async () => {
+    let streamCalls = 0;
+    const onNavigate = vi.fn();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/me') {
+        return new Response(
+          JSON.stringify({ id: 'u1', name: 'Dorothy', email: 'dorothy@example.com', picture: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url === '/api/conversations') {
+        return new Response(JSON.stringify({ conversations: [] }), { status: 200 });
+      }
+      if (url === '/api/integrations') {
+        return new Response(JSON.stringify({ integrations: [] }), { status: 200 });
+      }
+      if (url === '/api/health/deep') {
+        return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+      }
+      if (url === '/api/query/stream') {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          const sseBody =
+            'event: answer\r\ndata: {"answer":"GitHub issue [GitHub-19] is open.","evidence":[{"source":"github","citation_key":"GitHub-19","number":19,"title":"SSO redirect"}],"thread_id":"t-partial","warnings":[{"provider":"gmail","tool":"fetch_gmail","message":"Gmail API timeout"}]}\r\n\r\n' +
+            'event: done\r\ndata: {}\r\n\r\n';
+          return new Response(sseBody, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }
+        return new Response(JSON.stringify({ detail: 'Session expired' }), { status: 401 });
+      }
+      throw new Error(`Unhandled URL: ${url}`);
+    });
+
+    render(<App onNavigate={onNavigate} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Welcome, Dorothy!')).toBeTruthy();
+    });
+
+    // Turn 1: Partial connector failure callout renders alongside grounded GitHub answer
+    const input = screen.getByLabelText('Ask a question');
+    fireEvent.change(input, { target: { value: 'Cross-check GitHub and Gmail' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('partial-connector-warning')).toBeTruthy();
+    });
+    expect(screen.getByTestId('partial-connector-warning').textContent).toContain(
+      'Gmail: Gmail API timeout',
+    );
+    expect(screen.getByTestId('grounded-badge').textContent).toContain('Grounded in 1 source');
+
+    // Turn 2: Session expires mid-session (401) -> shows Session expired notice & redirects
+    fireEvent.change(screen.getByLabelText('Ask a question'), {
+      target: { value: 'Follow-up after cookie expiry' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-expired-notice')).toBeTruthy();
+      expect(onNavigate).toHaveBeenCalledWith('/');
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { DragEvent, FormEvent, useEffect, useRef, useState } from 'react';
+import { UnauthorizedApiError } from './chatStorage';
 import {
   disconnectIntegration,
   getIntegrationConnectUrl,
@@ -13,6 +14,7 @@ type Props = {
   initialProvider?: string | null;
   onRefresh: () => Promise<void> | void;
   onConnectOAuth?: (url: string) => void;
+  onUnauthorized?: () => void;
   onClose: () => void;
 };
 
@@ -57,6 +59,7 @@ export default function IntegrationsModal({
   initialProvider = null,
   onRefresh,
   onConnectOAuth,
+  onUnauthorized,
   onClose,
 }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -108,6 +111,11 @@ export default function IntegrationsModal({
       setEditingProvider(null);
       setFeedback({ kind: 'ok', text: `Updated ${item.display_name} scope.` });
     } catch (cause) {
+      if (cause instanceof UnauthorizedApiError) {
+        onClose();
+        onUnauthorized?.();
+        return;
+      }
       setFeedback({
         kind: 'error',
         text: cause instanceof Error ? cause.message : 'Failed to update configuration.',
@@ -127,6 +135,11 @@ export default function IntegrationsModal({
       await onRefresh();
       setFeedback({ kind: 'ok', text: `Disconnected ${item.display_name}.` });
     } catch (cause) {
+      if (cause instanceof UnauthorizedApiError) {
+        onClose();
+        onUnauthorized?.();
+        return;
+      }
       setFeedback({
         kind: 'error',
         text: cause instanceof Error ? cause.message : 'Failed to disconnect integration.',
@@ -154,6 +167,11 @@ export default function IntegrationsModal({
       setEditingProvider(null);
       setFeedback({ kind: 'ok', text: `Uploaded ${file.name} and connected SQLite.` });
     } catch (cause) {
+      if (cause instanceof UnauthorizedApiError) {
+        onClose();
+        onUnauthorized?.();
+        return;
+      }
       setFeedback({
         kind: 'error',
         text: cause instanceof Error ? cause.message : 'SQLite upload failed.',
@@ -175,6 +193,7 @@ export default function IntegrationsModal({
     <dialog
       ref={dialogRef}
       className="settings-dialog integrations-dialog"
+      aria-modal="true"
       aria-labelledby="integrations-title"
       onClose={onClose}
       onClick={(event) => {

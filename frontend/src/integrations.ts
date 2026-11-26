@@ -1,4 +1,4 @@
-import { UnauthorizedApiError } from './chatStorage';
+import { buildRateLimitError, UnauthorizedApiError } from './chatStorage';
 
 export type IntegrationStatus = 'connected' | 'disconnected' | 'needs_reauth' | 'coming_soon';
 export type IntegrationAuthType = 'oauth' | 'upload';
@@ -106,6 +106,7 @@ export async function fetchIntegrations(signal?: AbortSignal): Promise<UserInteg
     signal,
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok) {
     throw new Error(`Failed to load integrations (${response.status}).`);
   }
@@ -127,6 +128,7 @@ export async function updateIntegrationConfig(
     body: JSON.stringify({ config }),
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok) {
     let detail = `Failed to update ${provider} configuration (${response.status}).`;
     try {
@@ -149,6 +151,7 @@ export async function uploadSqliteDatabase(file: File): Promise<void> {
     body: form,
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok) {
     let detail = `SQLite upload failed (${response.status}).`;
     try {
@@ -168,6 +171,7 @@ export async function disconnectIntegration(provider: string): Promise<void> {
     headers: { Accept: 'application/json' },
   });
   if (response.status === 401) throw new UnauthorizedApiError();
+  if (response.status === 429) throw await buildRateLimitError(response);
   if (!response.ok && response.status !== 404) {
     throw new Error(`Failed to disconnect ${provider} (${response.status}).`);
   }

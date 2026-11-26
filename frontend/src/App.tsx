@@ -49,8 +49,23 @@ function downloadFile(filename: string, content: string, type: string) {
 type AuthGateState =
   | { status: 'checking' }
   | { status: 'authenticated'; user: AuthUser }
-  | { status: 'unauthenticated' }
+  | { status: 'unauthenticated'; expired?: boolean }
   | { status: 'error'; message: string };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  github: 'GitHub',
+  gmail: 'Gmail',
+  notion: 'Notion',
+  sqlite: 'SQLite',
+  google_sheets: 'Google Sheets',
+  google_calendar: 'Google Calendar',
+};
+
+function formatConnectorLabel(raw?: string): string {
+  if (!raw) return 'Connector';
+  const normalized = raw.trim().toLowerCase();
+  return PROVIDER_LABELS[normalized] ?? raw;
+}
 
 type AppProps = {
   onNavigate?: (url: string) => void;
@@ -58,6 +73,7 @@ type AppProps = {
 
 export default function App({ onNavigate }: AppProps = {}) {
   const [authState, setAuthState] = useState<AuthGateState>({ status: 'checking' });
+  const wasAuthenticatedRef = useRef(false);
   const [signingOut, setSigningOut] = useState(false);
   const [query, setQuery] = useState('');
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
@@ -70,13 +86,16 @@ export default function App({ onNavigate }: AppProps = {}) {
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [focusedProvider, setFocusedProvider] = useState<string | null>(null);
   const [connectedToast, setConnectedToast] = useState<string | null>(null);
+  const [oauthErrorToast, setOauthErrorToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [highlightedCitation, setHighlightedCitation] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleUnauthorized = useCallback(() => {
-    setAuthState({ status: 'unauthenticated' });
+    const expired = wasAuthenticatedRef.current;
+    wasAuthenticatedRef.current = false;
+    setAuthState({ status: 'unauthenticated', expired });
     redirectToLanding(onNavigate);
   }, [onNavigate]);
 
@@ -87,10 +106,12 @@ export default function App({ onNavigate }: AppProps = {}) {
         const result = await fetchCurrentUser(signal);
         if (signal?.aborted) return;
         if (result.status === 'unauthenticated') {
-          setAuthState({ status: 'unauthenticated' });
+          wasAuthenticatedRef.current = false;
+          setAuthState({ status: 'unauthenticated', expired: false });
           redirectToLanding(onNavigate);
           return;
         }
+        wasAuthenticatedRef.current = true;
         setAuthState({ status: 'authenticated', user: result.user });
       } catch (cause) {
         if (signal?.aborted) return;
@@ -143,9 +164,27 @@ export default function App({ onNavigate }: AppProps = {}) {
 
     const params = new URLSearchParams(window.location.search);
     const connectedProvider = params.get('connected')?.trim();
+    const oauthErr = params.get('error')?.trim();
+    const oauthErrProv = params.get('provider')?.trim();
+    let dirtyUrl = false;
+
     if (connectedProvider) {
       setConnectedToast(connectedProvider);
       params.delete('connected');
+      dirtyUrl = true;
+    }
+    if (oauthErr) {
+      const provLabel = formatConnectorLabel(oauthErrProv);
+      setOauthErrorToast(
+        oauthErr === 'access_denied'
+          ? `${provLabel} authorization was cancelled.`
+          : `Could not complete ${provLabel} connection (${oauthErr}). Please try again.`,
+      );
+      params.delete('error');
+      params.delete('provider');
+      dirtyUrl = true;
+    }
+    if (dirtyUrl) {
       const qs = params.toString();
       const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
       window.history.replaceState({}, '', nextUrl);
@@ -165,9 +204,15 @@ export default function App({ onNavigate }: AppProps = {}) {
     inspectTurn,
     messages,
     evidence,
+    warnings,
     steps,
     traceUrl,
     error,
+    rateLimitMessage,
+    rateLimitSecondsLeft,
+    lastFailedQuery,
+    dismissRateLimit,
+    retryLastQuery,
     loading,
     loadingThread,
     hasThread,
@@ -249,14 +294,16 @@ export default function App({ onNavigate }: AppProps = {}) {
   const ask = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || loading) return;
+      if (!trimmed || loading || rateLimitSecondsLeft > 0) return;
       const completed = await submit(trimmed);
       if (completed) {
         setQuery('');
         if (settings.showDetailsByDefault) setDetailsOpen(true);
+      } else {
+        setQuery((prev) => prev || trimmed);
       }
     },
-    [loading, submit, settings.showDetailsByDefault],
+    [loading, rateLimitSecondsLeft, submit, settings.showDetailsByDefault],
   );
 
   function openIntegrationsHub(provider: string | null = null) {
@@ -385,8 +432,12 @@ export default function App({ onNavigate }: AppProps = {}) {
     return (
       <div className="auth-gate" data-testid="auth-unauthenticated">
         <div className="auth-gate-card">
-          <h1>Sign in required</h1>
-          <p>Redirecting you to the landing page to sign in with Google…</p>
+          <h1>{authState.expired ? 'Session expired' : 'Sign in required'}</h1>
+          <p data-testid={authState.expired ? 'session-expired-notice' : undefined}>
+            {authState.expired
+              ? 'Your Google session expired. Redirecting you to the landing page to sign in again…'
+              : 'Redirecting you to the landing page to sign in with Google…'}
+          </p>
           <div className="auth-gate-actions">
             <a className="btn" href={getLandingUrl()}>
               Continue to landing page
@@ -445,7 +496,7 @@ export default function App({ onNavigate }: AppProps = {}) {
         <button
           type="submit"
           className="send-btn"
-          disabled={!query.trim()}
+          disabled={!query.trim() || rateLimitSecondsLeft > 0}
           aria-label="Send question"
         >
           ↑
@@ -540,6 +591,54 @@ export default function App({ onNavigate }: AppProps = {}) {
             </div>
           )}
 
+          {oauthErrorToast && (
+            <div className="error-box error-box--stage" role="alert" data-testid="oauth-error-banner">
+              <div className="banner-row">
+                <span>{oauthErrorToast}</span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Dismiss OAuth error"
+                  onClick={() => setOauthErrorToast(null)}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
+
+          {rateLimitMessage && (
+            <div className="reauth-banner reauth-banner--stage rate-limit-banner" role="alert" data-testid="rate-limit-banner">
+              <div>
+                <strong>Rate limit reached:</strong>{' '}
+                <span>{rateLimitMessage}</span>
+                <span className="chip-tag chip-tag--warn" data-testid="rate-limit-countdown">
+                  {rateLimitSecondsLeft > 0 ? `Retry in ${rateLimitSecondsLeft}s` : 'Ready to retry'}
+                </span>
+              </div>
+              <div className="banner-actions">
+                {lastFailedQuery && (
+                  <button
+                    type="button"
+                    className="btn btn--xs"
+                    disabled={rateLimitSecondsLeft > 0 || loading}
+                    onClick={() => void retryLastQuery()}
+                  >
+                    Retry
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Dismiss rate limit notice"
+                  onClick={dismissRateLimit}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
+
           {needsReauthItems.length > 0 && (
             <div className="reauth-banner reauth-banner--stage" role="alert" data-testid="stage-reauth-banner">
               <div>
@@ -597,6 +696,23 @@ export default function App({ onNavigate }: AppProps = {}) {
 
                 {integrationsLoading && integrations.length === 0 ? (
                   <p className="history-empty">Loading available integrations…</p>
+                ) : integrations.length === 0 ? (
+                  <div className="empty-sources-card" data-testid="home-sources-empty">
+                    <div>
+                      <strong>Connect your first tool</strong>
+                      <span>
+                        Link GitHub, Gmail, Notion, or upload a SQLite database so answers are
+                        grounded in your live private workspace.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn--xs"
+                      onClick={() => openIntegrationsHub(null)}
+                    >
+                      + Connect tools
+                    </button>
+                  </div>
                 ) : (
                   <ul className="source-grid">
                     {integrations.map((source) => {
@@ -695,6 +811,12 @@ export default function App({ onNavigate }: AppProps = {}) {
                     : msg.id === lastAssistantId
                       ? (traceUrl ?? null)
                       : null;
+                const msgWarnings =
+                  msg.warnings !== undefined
+                    ? msg.warnings
+                    : msg.id === lastAssistantId
+                      ? warnings
+                      : null;
 
                 return (
                   <article
@@ -706,6 +828,39 @@ export default function App({ onNavigate }: AppProps = {}) {
                       <p className="message-text">{msg.content}</p>
                     ) : (
                       <>
+                        {msgWarnings && msgWarnings.length > 0 && (
+                          <div
+                            className="partial-warning-card"
+                            role="status"
+                            data-testid="partial-connector-warning"
+                          >
+                            <div className="partial-warning-body">
+                              <strong>
+                                Partial source issue ({msgWarnings
+                                  .map((w) => formatConnectorLabel(w.provider || w.tool))
+                                  .join(', ')})
+                              </strong>
+                              <span>
+                                {msgWarnings
+                                  .map(
+                                    (w) =>
+                                      `${formatConnectorLabel(w.provider || w.tool)}: ${w.message}`,
+                                  )
+                                  .join(' · ')}{' '}
+                                — answered using your remaining healthy sources.
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn--xs"
+                              onClick={() =>
+                                openIntegrationsHub(msgWarnings[0]?.provider ?? null)
+                              }
+                            >
+                              Check integration
+                            </button>
+                          </div>
+                        )}
                         <div className="markdown">
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
@@ -805,8 +960,21 @@ export default function App({ onNavigate }: AppProps = {}) {
 
               {error && (
                 <div className="error-box" role="alert">
-                  <strong>We couldn’t get an answer</strong>
-                  <span>{error}</span>
+                  <div className="banner-row">
+                    <div className="error-box-copy">
+                      <strong>We couldn’t get an answer</strong>
+                      <span>{error}</span>
+                    </div>
+                    {lastFailedQuery && !loading && (
+                      <button
+                        type="button"
+                        className="btn btn--xs"
+                        onClick={() => void retryLastQuery()}
+                      >
+                        Try again
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
               <div ref={chatEndRef} />
@@ -862,6 +1030,7 @@ export default function App({ onNavigate }: AppProps = {}) {
         integrations={integrations}
         initialProvider={focusedProvider}
         onRefresh={() => refreshIntegrations()}
+        onUnauthorized={handleUnauthorized}
         onConnectOAuth={(url) => {
           if (onNavigate) onNavigate(url);
           else window.location.assign(url);
