@@ -6,7 +6,7 @@ type Props = {
   highlightedKey?: string | null;
 };
 
-function recordCitationKey(record: EvidenceRecord, index: number): string {
+export function recordCitationKey(record: EvidenceRecord, index: number): string {
   if (record.title !== undefined || record.number !== undefined) {
     return `GitHub-${record.number ?? record.id ?? index + 1}`;
   }
