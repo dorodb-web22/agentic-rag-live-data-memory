@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 
-cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5500")
 cors_origins = [orig.strip() for orig in cors_origins_env.split(",") if orig.strip()]
 if not cors_origins:
     cors_origins = ["http://localhost:5173"]
@@ -70,9 +70,20 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST", "GET", "DELETE", "PATCH"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Sprint 1 — Auth + Multi-tenant routes (Alok owns these)
+# ---------------------------------------------------------------------------
+from app.middleware.csrf import CSRFOriginMiddleware  # noqa: E402
+from app.routes.auth import router as auth_router  # noqa: E402
+from app.routes.conversations import router as conv_router  # noqa: E402
+
+app.add_middleware(CSRFOriginMiddleware)
+app.include_router(auth_router, prefix="/api")
+app.include_router(conv_router, prefix="/api")
 
 
 def _accepts_thread_id(fn: object) -> bool:
