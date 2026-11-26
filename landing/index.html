@@ -365,8 +365,8 @@ dialog h3{font:800 1.8rem/1.1 var(--fd);letter-spacing:-.03em}dialog p{color:var
 <script>
 const setRoll=(b,t)=>{b.innerHTML='<span class="roll"><span></span></span>';const s=b.querySelector(".roll>span");s.textContent=t;s.dataset.t=t};
 /* ===== CONFIG: set these two values ===== */
-const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com"; // Google Cloud Console → Credentials → OAuth client (Web)
-const API_BASE        = "http://localhost:8000";                      // where your FastAPI backend runs
+const GOOGLE_CLIENT_ID = "276959651113-nulj1hlumsq72919fmdt5c9gr6b1sglc.apps.googleusercontent.com"; // Google Cloud Console → Credentials → OAuth client (Web)
+const API_BASE        = "http://localhost:8001";                      // where your FastAPI backend runs
 const AUTH_ENDPOINT   = API_BASE + "/auth/google";                    // FastAPI route that verifies the token (backend/auth_google.py)
 const APP_URL         = "http://localhost:5173";                      // where your React app (frontend/) runs
 const REQUIRE_BACKEND = true;                                         // true = sign in only if the backend verified the token (keep true outside local demos)
