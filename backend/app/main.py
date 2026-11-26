@@ -150,12 +150,12 @@ app.add_middleware(CSRFOriginMiddleware)
 app.include_router(auth_router, prefix="/api")
 app.include_router(conv_router, prefix="/api")
 
-try:
-    from app.routes.integrations import router as integrations_router  # type: ignore[import-not-found]
+# ---------------------------------------------------------------------------
+# Sprint 2 — Per-user OAuth Connector Registry (Alok owns these)
+# ---------------------------------------------------------------------------
+from app.routes.integrations import router as integrations_router  # noqa: E402
 
-    app.include_router(integrations_router, prefix="/api")
-except ImportError:
-    pass
+app.include_router(integrations_router, prefix="/api")
 
 
 def _accepts_thread_id(fn: object) -> bool:
