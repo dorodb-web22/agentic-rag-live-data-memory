@@ -1,8 +1,10 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 MAX_QUERY_LENGTH = 2000
+THREAD_ID_PATTERN = r"^[a-zA-Z0-9_\-]{1,64}$"
 
 
 class QueryRequest(BaseModel):
@@ -23,7 +25,11 @@ class QueryRequest(BaseModel):
         if value is None:
             return None
         cleaned = value.strip()
-        return cleaned or None
+        if not cleaned:
+            return None
+        if not re.match(THREAD_ID_PATTERN, cleaned):
+            raise ValueError("thread_id must be 1-64 alphanumeric characters, underscores, or hyphens.")
+        return cleaned
 
 
 class QueryResponse(BaseModel):

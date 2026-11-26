@@ -8,6 +8,7 @@ from app.agent import (
     _build_citation_index,
     _validate_citations,
     create_agent_graph,
+    is_github_query,
     planner_node,
 )
 
@@ -31,11 +32,15 @@ class MockGithubClient:
         self.prs = prs or [
             {"number": 27, "title": "fix: retrieval and routing", "state": "open"},
         ]
+        self.issues_calls: int = 0
+        self.prs_calls: int = 0
 
     def list_issues_safe_sync(self, owner: str, repo: str, state: str = "open") -> dict[str, Any]:
+        self.issues_calls += 1
         return {"success": True, "data": self.issues, "error": None}
 
     def list_pull_requests_safe_sync(self, owner: str, repo: str, state: str = "open") -> dict[str, Any]:
+        self.prs_calls += 1
         return {"success": True, "data": self.prs, "error": None}
 
 
@@ -95,3 +100,50 @@ def test_agent_github_unconfigured_token_graceful_notice(monkeypatch: pytest.Mon
     answer, evidence = agent.query_with_evidence("What PRs are open on GitHub?")
     assert "GITHUB_PERSONAL_ACCESS_TOKEN" in answer
     assert evidence is None
+
+
+@pytest.mark.parametrize(
+    "query, expected_plan",
+    [
+        ("How can we improve our team productivity?", "general"),
+        ("What is the best approach to learning Python?", "general"),
+        ("What is the price of the Enterprise package?", "db"),
+        ("Give me a comprehensive overview of our subscription plans", "db"),
+    ],
+)
+def test_pr_substring_words_do_not_false_positive_to_github(
+    query: str, expected_plan: str
+) -> None:
+    assert is_github_query(query) is False
+    plan = planner_node({"query": query})
+    assert plan["plan"] == expected_plan
+
+
+def test_worker_pr_word_boundary_does_not_misroute_issues_query() -> None:
+    mock_gh = MockGithubClient()
+    fake_llm = RecordingFakeLLM("Open issue [GitHub-19].")
+    graph = create_agent_graph(llm=fake_llm, github_client=mock_gh)
+    agent = BasicAgent(graph=graph, github_client=mock_gh)
+
+    # Contains "comprehensive", "improve", "enterprise", "approach" (all contain "pr" substring)
+    answer, evidence = agent.query_with_evidence(
+        "Give a comprehensive list of open GitHub issues to improve our enterprise approach"
+    )
+    assert "[GitHub-19]" in answer
+    assert evidence is not None
+    assert mock_gh.issues_calls == 1
+    assert mock_gh.prs_calls == 0
+
+
+def test_worker_routes_pr_query_to_pull_requests() -> None:
+    mock_gh = MockGithubClient()
+    fake_llm = RecordingFakeLLM("Open PR [GitHub-27].")
+    graph = create_agent_graph(llm=fake_llm, github_client=mock_gh)
+    agent = BasicAgent(graph=graph, github_client=mock_gh)
+
+    answer, evidence = agent.query_with_evidence("Show open PRs on GitHub")
+    assert "[GitHub-27]" in answer
+    assert evidence is not None
+    assert mock_gh.prs_calls == 1
+    assert mock_gh.issues_calls == 0
+

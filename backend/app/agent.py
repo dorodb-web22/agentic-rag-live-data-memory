@@ -29,14 +29,31 @@ DATABASE_KEYWORDS = {
     "storage", "support",
 }
 
+STRONG_DB_KEYWORDS = {
+    "product", "products", "price", "prices", "pricing", "cost", "costs", "how much",
+    "starter", "professional", "enterprise", "subscription", "subscriptions",
+    "catalog", "inventory", "tier", "tiers", "add-on", "addon", "package", "packages",
+}
+
 GITHUB_KEYWORDS = {
     "issue", "issues", "pull request", "pull requests", "pr", "prs",
     "repo", "repository", "bug", "bugs", "commit", "commits", "github",
 }
 
+GITHUB_PR_KEYWORDS = {
+    "pull request", "pull requests", "pr", "prs",
+}
+
 DB_DIRECT_PHRASES = (
     "in the database", "from the database", "in the table", "from the table",
     "database records", "database table", "sqlite database", "query database",
+)
+
+NON_DB_PATTERNS = (
+    r"\bsupport\s+vector\b",
+    r"\bservice\s+(?:dog|animal|pet)\b",
+    r"\bplan\s+(?:for\s+(?:today|tomorrow|yesterday|the\s+weekend|next\s+week)|a\s+trip|to\b)",
+    r"\b(?:workout|lesson|meal|diet|business)\s+plan\b",
 )
 
 STOP_WORDS = {
@@ -50,30 +67,50 @@ def is_database_query(query: str) -> bool:
     lowered = query.lower()
     if any(phrase in lowered for phrase in DB_DIRECT_PHRASES):
         return True
-    return any(keyword in lowered for keyword in DATABASE_KEYWORDS)
+    if any(re.search(pat, lowered) for pat in NON_DB_PATTERNS):
+        if not any(re.search(rf"\b{re.escape(k)}\b", lowered) for k in STRONG_DB_KEYWORDS):
+            return False
+    return any(re.search(rf"\b{re.escape(keyword)}\b", lowered) for keyword in DATABASE_KEYWORDS)
+
+
+def is_github_query(query: str) -> bool:
+    """Determine whether a natural language query targets GitHub repository information."""
+    query_lower = query.lower()
+    return any(re.search(rf"\b{re.escape(kw)}\b", query_lower) for kw in GITHUB_KEYWORDS)
 
 
 def build_sql_query(user_query: str) -> tuple[str, str | None]:
     """Construct a safe read-only SELECT statement tailored to the user query."""
     lowered = user_query.lower()
     known_products = ["enterprise", "starter", "professional", "storage", "support"]
-    for prod in known_products:
-        if prod in lowered:
-            return (
-                f"SELECT id, name, description, price, category FROM products WHERE LOWER(name) LIKE '%{prod}%'",
-                prod,
-            )
+    matched_known = [prod for prod in known_products if re.search(rf"\b{re.escape(prod)}\b", lowered)]
+    if matched_known:
+        clauses = [f"LOWER(name) LIKE '%{prod}%'" for prod in matched_known]
+        where_clause = " OR ".join(clauses)
+        term = ", ".join(matched_known) if len(matched_known) > 1 else matched_known[0]
+        return (
+            f"SELECT id, name, description, price, category FROM products WHERE {where_clause}",
+            term,
+        )
 
-    match = re.search(r"([a-zA-Z0-9_\-]+)\s+(?:package|plan|tier|product)", lowered)
-    if match and match.group(1) not in STOP_WORDS:
+    matches = re.finditer(r"([a-zA-Z0-9_\-]+)\s+(?:package|plan|tier|product)", lowered)
+    extracted_terms = []
+    for match in matches:
         raw_term = match.group(1)
-        # Sanitize term to alphanumeric only to prevent wildcard or syntax issues
-        sanitized_term = re.sub(r"[^a-zA-Z0-9]", "", raw_term)
-        if sanitized_term:
-            return (
-                f"SELECT id, name, description, price, category FROM products WHERE LOWER(name) LIKE '%{sanitized_term}%'",
-                sanitized_term,
-            )
+        if raw_term not in STOP_WORDS:
+            # Sanitize term to alphanumeric only to prevent wildcard or syntax issues
+            sanitized_term = re.sub(r"[^a-zA-Z0-9]", "", raw_term)
+            if sanitized_term and sanitized_term not in extracted_terms:
+                extracted_terms.append(sanitized_term)
+
+    if extracted_terms:
+        clauses = [f"LOWER(name) LIKE '%{t}%'" for t in extracted_terms]
+        where_clause = " OR ".join(clauses)
+        term = ", ".join(extracted_terms) if len(extracted_terms) > 1 else extracted_terms[0]
+        return (
+            f"SELECT id, name, description, price, category FROM products WHERE {where_clause}",
+            term,
+        )
 
     return "SELECT id, name, description, price, category FROM products", None
 
@@ -214,8 +251,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     Does NOT call the LLM or MCP — pure routing logic.
     """
     query = state["query"]
-    lowered = query.lower()
-    if any(re.search(rf"\b{re.escape(kw)}\b", lowered) for kw in GITHUB_KEYWORDS):
+    if is_github_query(query):
         return {"plan": "github", "sql": None}
     if is_database_query(query):
         sql, _ = build_sql_query(query)
@@ -343,7 +379,11 @@ def worker_node(
                     gh = None
 
             if gh is not None:
-                is_pr = any(k in query.lower() for k in ["pull request", "pull requests", "pr", "prs"])
+                query_lower = query.lower()
+                is_pr = any(
+                    re.search(rf"\b{re.escape(kw)}\b", query_lower)
+                    for kw in GITHUB_PR_KEYWORDS
+                )
                 try:
                     if is_pr and hasattr(gh, "list_pull_requests_safe_sync"):
                         res = gh.list_pull_requests_safe_sync(owner=owner, repo=repo_name)
@@ -594,14 +634,18 @@ class BasicAgent:
                     "answer": answer_text,
                     "evidence": final_state.get("evidence"),
                     "thread_id": resolved_thread_id,
+                    "run_id": run_id,
                 },
             }
         except GraphRecursionError as exc:
             logger.error("Graph recursion limit hit: %s", exc)
             yield {"event": "error", "data": {"message": str(_recursion_error())}}
+        except AgentError as exc:
+            logger.error("Agent error during stream execution: %s", exc)
+            yield {"event": "error", "data": {"message": str(exc)}}
         except Exception as exc:
             logger.exception("Agent stream execution failed: %s", exc)
-            yield {"event": "error", "data": {"message": str(exc)}}
+            yield {"event": "error", "data": {"message": f"LLM request failed ({type(exc).__name__})."}}
         finally:
             yield {"event": "done", "data": {}}
 

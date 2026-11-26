@@ -22,6 +22,9 @@ dev = [
     "httpx>=0.27",
     "pytest>=8.0",
 ]
+eval = [
+    "deepeval>=1.5.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -29,4 +32,4 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["app*", "evals*"]
