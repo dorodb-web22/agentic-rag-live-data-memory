@@ -48,6 +48,12 @@ describe('App — Auth Gate, Personalization & Server-Side History', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
+      if (url === '/api/integrations') {
+        return new Response(JSON.stringify({ integrations: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       if (url === '/api/health/deep') {
         return new Response(JSON.stringify({ status: 'ok' }), {
           status: 200,
@@ -112,6 +118,12 @@ describe('App — Auth Gate, Personalization & Server-Side History', () => {
       }
       if (url === '/api/health/deep') {
         return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+      }
+      if (url === '/api/integrations') {
+        return new Response(JSON.stringify({ integrations: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
       if (url === '/api/conversations' && (!init?.method || init.method === 'GET')) {
         return new Response(

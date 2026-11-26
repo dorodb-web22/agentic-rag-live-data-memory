@@ -464,6 +464,11 @@ button {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
 }
 
+.health-dot--warn {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
+}
+
 .health-dot--offline {
   background: var(--danger);
 }
@@ -596,6 +601,22 @@ button {
   margin-top: 28px;
 }
 
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.section-header-row .section-label {
+  margin: 0;
+}
+
+.section-header-row .text-btn {
+  margin-left: 0;
+}
+
 .section-label {
   margin: 0 0 10px;
   color: var(--ink-3);
@@ -621,6 +642,33 @@ button {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.source-card--interactive {
+  cursor: pointer;
+}
+
+.source-card--interactive:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.source-card--coming-soon {
+  opacity: 0.76;
+}
+
+.btn--xs {
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.chip-tag--warn {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
 }
 
 .source-card div {
@@ -1135,6 +1183,12 @@ button {
   gap: 10px;
 }
 
+.source-badge-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .source-badge {
   display: inline-flex;
   align-items: center;
@@ -1151,6 +1205,51 @@ button {
 .source-badge--github {
   background: var(--warm-soft);
   color: var(--warm-soft-ink);
+}
+
+.source-badge--gmail {
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface-2));
+  color: var(--ink);
+}
+
+.source-badge--notion {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.evidence-ext-link {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--link);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.evidence-ext-link:hover {
+  text-decoration: underline;
+}
+
+.evidence-kv-list {
+  margin: 4px 0 0;
+  display: grid;
+  gap: 2px;
+  font-size: 11.5px;
+}
+
+.evidence-kv-row {
+  display: flex;
+  gap: 6px;
+}
+
+.evidence-kv-row dt {
+  color: var(--ink-3);
+  font-weight: 600;
+}
+
+.evidence-kv-row dd {
+  margin: 0;
+  color: var(--ink-2);
 }
 
 .source-badge-dot {
@@ -1475,6 +1574,129 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* ===== Integrations Hub Modal & Banners ===== */
+.integrations-dialog {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.integrations-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.integration-item {
+  display: grid;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.integration-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.integration-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.integration-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.integration-desc {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.integration-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.integration-config-form {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.sqlite-dropzone {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.sqlite-dropzone--active {
+  border-color: var(--focus-ring);
+  background: var(--accent-soft);
+}
+
+.sqlite-dropzone p {
+  margin: 0;
+}
+
+.toast-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ok) 12%, var(--surface));
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toast-banner--stage,
+.reauth-banner--stage {
+  width: min(100%, 780px);
+  margin: 0 auto 16px;
+}
+
+.reauth-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warn) 12%, var(--surface));
+  font-size: 12.5px;
+}
+
+.reauth-banner div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* ===== Responsive ===== */

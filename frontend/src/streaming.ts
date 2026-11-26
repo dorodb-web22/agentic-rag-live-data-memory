@@ -1,6 +1,6 @@
 // Pure helpers for the /api/query/stream SSE contract (no React, easy to unit test).
 
-export type TraceNode = 'planner' | 'worker';
+export type TraceNode = 'planner' | 'worker' | 'tools';
 
 export type TraceStep = {
   id: string;
@@ -21,7 +21,7 @@ export type StreamEvent =
   | { type: 'error'; data: { message: string } }
   | { type: 'done'; data: Record<string, never> };
 
-const KNOWN_NODES: readonly string[] = ['planner', 'worker'];
+const KNOWN_NODES: readonly string[] = ['planner', 'worker', 'tools'];
 const KNOWN_EVENTS: readonly string[] = ['step', 'trace', 'answer', 'error', 'done'];
 
 /** Parse one SSE frame ("event: x\ndata: {...}"). Returns null for unknown/malformed frames. */
@@ -95,13 +95,17 @@ export function closeRunningSteps(steps: TraceStep[]): TraceStep[] {
 }
 
 export const NODE_LABELS: Record<TraceNode, { label: string; detail: string }> = {
-  planner: { label: 'Planning', detail: 'Selecting tool & building query' },
-  worker: { label: 'Working', detail: 'Reviewing data & writing answer' },
+  planner: { label: 'Planning', detail: 'Selecting connected tools & arguments' },
+  tools: { label: 'Retrieving', detail: 'Querying connected tools in parallel' },
+  worker: { label: 'Synthesizing', detail: 'Validating citations & writing answer' },
 };
 
-/** Turn `[Product-3]` / `[GitHub-12]` markers into markdown links (`#cite-...`) so the UI renders badges. */
+/** Turn `[GitHub-12]` / `[Gmail-abc]` / `[Notion-xyz]` / `[SQL-tbl-1]` / `[Product-3]` markers into markdown links (`#cite-...`). */
 export function linkifyCitations(markdown: string): string {
-  return markdown.replace(/\[((?:Product|GitHub|SQLite)-[A-Za-z0-9_]+)\](?!\()/g, '[$1](#cite-$1)');
+  return markdown.replace(
+    /\[((?:GitHub|Gmail|Notion|SQL|Product|SQLite)-[A-Za-z0-9_\-]+)\](?!\()/g,
+    '[$1](#cite-$1)',
+  );
 }
 
 export const MAX_QUERY_LENGTH = 2000;

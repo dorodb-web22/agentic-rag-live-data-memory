@@ -10,12 +10,15 @@ type Props = {
   activeThreadId: string | null;
   activeView: 'home' | 'chat';
   health: HealthState;
+  connectedIntegrationsCount?: number;
+  needsReauthCount?: number;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onHome: () => void;
   onNewChat: () => void;
   onSelect: (threadId: string) => void;
   onDelete: (threadId: string) => void;
+  onOpenIntegrations: () => void;
   onOpenSettings: () => void;
 };
 
@@ -31,12 +34,15 @@ export default function Sidebar({
   activeThreadId,
   activeView,
   health,
+  connectedIntegrationsCount = 0,
+  needsReauthCount = 0,
   collapsed,
   onToggleCollapsed,
   onHome,
   onNewChat,
   onSelect,
   onDelete,
+  onOpenIntegrations,
   onOpenSettings,
 }: Props) {
   const [avatarError, setAvatarError] = useState(false);
@@ -100,6 +106,21 @@ export default function Sidebar({
         <button type="button" className="nav-item" onClick={onNewChat}>
           <span>New chat</span>
           <span className="nav-glyph" aria-hidden="true">＋</span>
+        </button>
+        <button
+          type="button"
+          className="nav-item"
+          onClick={onOpenIntegrations}
+          data-testid="sidebar-integrations-btn"
+        >
+          <span>Integrations</span>
+          {needsReauthCount > 0 ? (
+            <span className="chip-tag chip-tag--warn">Reconnect</span>
+          ) : connectedIntegrationsCount > 0 ? (
+            <span className="badge">{connectedIntegrationsCount}</span>
+          ) : (
+            <span className="nav-glyph" aria-hidden="true">⇄</span>
+          )}
         </button>
       </nav>
 

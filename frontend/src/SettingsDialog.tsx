@@ -7,9 +7,11 @@ type Props = {
   user: AuthUser;
   settings: Settings;
   conversationCount: number;
+  connectedIntegrationsCount?: number;
   signingOut?: boolean;
   onChange: (next: Settings) => void;
   onSignOut: () => void;
+  onOpenIntegrations: () => void;
   onExportAll: () => void;
   onClearAll: () => void;
   onClose: () => void;
@@ -26,9 +28,11 @@ export default function SettingsDialog({
   user,
   settings,
   conversationCount,
+  connectedIntegrationsCount = 0,
   signingOut = false,
   onChange,
   onSignOut,
+  onOpenIntegrations,
   onExportAll,
   onClearAll,
   onClose,
@@ -125,6 +129,26 @@ export default function SettingsDialog({
 
         <section className="settings-section">
           <h3>Workspace</h3>
+          <div className="toggle-row">
+            <span>
+              Connected integrations
+              <small>
+                {connectedIntegrationsCount === 0
+                  ? 'Connect GitHub, Gmail, Notion, or upload SQLite.'
+                  : `${connectedIntegrationsCount} tool${connectedIntegrationsCount === 1 ? '' : 's'} connected to your workspace.`}
+              </small>
+            </span>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                onClose();
+                onOpenIntegrations();
+              }}
+            >
+              Manage integrations
+            </button>
+          </div>
           <label className="toggle-row">
             <span>
               Show sources &amp; trace panel automatically
