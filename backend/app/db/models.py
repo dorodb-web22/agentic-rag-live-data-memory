@@ -9,15 +9,20 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+EMBEDDING_DIM = 1536
 
 
 def _now() -> datetime:
@@ -156,4 +161,54 @@ class UserIntegration(Base):
         UniqueConstraint("user_id", "provider", name="uq_integrations_user_provider"),
         Index("ix_integrations_user_id", "user_id"),
         Index("ix_integrations_provider", "provider"),
+    )
+
+
+class DocumentChunk(Base):
+    """Multi-tenant pgvector + PostgreSQL FTS chunk store (Sprint 3)."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=_uuid
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    citation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True
+    )
+    tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('english', coalesce(title, '') || ' ' || coalesce(chunk_text, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "provider",
+            "external_id",
+            "chunk_index",
+            name="uq_doc_chunks_user_provider_ext_idx",
+        ),
+        Index("ix_doc_chunks_user_provider", "user_id", "provider"),
+        Index("ix_doc_chunks_tsv", "tsv", postgresql_using="gin"),
     )
