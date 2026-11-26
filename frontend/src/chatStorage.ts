@@ -11,6 +11,7 @@ export type EvidenceRecord = {
   title?: string;
   state?: string;
   html_url?: string;
+  url?: string;
   user?: { login?: string };
   [key: string]: unknown;
 };
@@ -19,6 +20,8 @@ export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  evidence?: EvidenceRecord[] | null;
+  traceUrl?: string | null;
   createdAt: string;
 };
 
@@ -33,65 +36,32 @@ export type SavedConversation = {
   updatedAt: string;
 };
 
-const USER_KEY = 'agentic_rag.active_user.v1';
-const CHATS_PREFIX = 'agentic_rag.chats.v1.';
-const MAX_SAVED_CHATS = 50;
+export type ServerConversationSummary = {
+  id: string;
+  thread_id: string;
+  title: string;
+  updated_at: string;
+};
 
-export function normalizeUserHandle(raw: string): string {
-  const cleaned = raw.trim().toLowerCase().replace(/[^a-z0-9._@-]/g, '');
-  return cleaned || 'dorothy';
-}
+export type ServerConversationMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  evidence: EvidenceRecord[] | null;
+  trace_url: string | null;
+  created_at: string;
+};
 
-export function loadActiveUser(): string {
-  try {
-    const stored = localStorage.getItem(USER_KEY);
-    return stored ? normalizeUserHandle(stored) : 'dorothy';
-  } catch {
-    return 'dorothy';
-  }
-}
+export type ServerConversationDetail = {
+  thread_id: string;
+  title: string;
+  messages: ServerConversationMessage[];
+};
 
-export function saveActiveUser(handle: string): string {
-  const normalized = normalizeUserHandle(handle);
-  try {
-    localStorage.setItem(USER_KEY, normalized);
-  } catch {
-    /* ignore quota / private mode errors */
-  }
-  return normalized;
-}
-
-function storageKeyForUser(handle: string): string {
-  return `${CHATS_PREFIX}${normalizeUserHandle(handle)}`;
-}
-
-export function loadConversations(handle: string): SavedConversation[] {
-  try {
-    const raw = localStorage.getItem(storageKeyForUser(handle));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is SavedConversation =>
-        item &&
-        typeof item === 'object' &&
-        typeof item.id === 'string' &&
-        typeof item.title === 'string' &&
-        Array.isArray(item.messages),
-    );
-  } catch {
-    return [];
-  }
-}
-
-export function saveConversations(handle: string, conversations: SavedConversation[]): void {
-  try {
-    localStorage.setItem(
-      storageKeyForUser(handle),
-      JSON.stringify(conversations.slice(0, MAX_SAVED_CHATS)),
-    );
-  } catch {
-    /* ignore quota errors */
+export class UnauthorizedApiError extends Error {
+  constructor(message = 'Session expired. Please sign in again.') {
+    super(message);
+    this.name = 'UnauthorizedApiError';
   }
 }
 
@@ -105,12 +75,109 @@ export function upsertConversation(
   list: SavedConversation[],
   updated: SavedConversation,
 ): SavedConversation[] {
-  const without = list.filter((item) => item.id !== updated.id);
-  return [updated, ...without].slice(0, MAX_SAVED_CHATS);
+  const without = list.filter((item) => {
+    if (updated.threadId && item.threadId === updated.threadId) return false;
+    return item.id !== updated.id;
+  });
+  return [updated, ...without];
 }
 
-export function deleteConversation(list: SavedConversation[], id: string): SavedConversation[] {
-  return list.filter((item) => item.id !== id);
+export function deleteConversation(
+  list: SavedConversation[],
+  idOrThreadId: string,
+): SavedConversation[] {
+  return list.filter((item) => item.threadId !== idOrThreadId && item.id !== idOrThreadId);
+}
+
+export function mapConversationSummary(raw: ServerConversationSummary): SavedConversation {
+  return {
+    id: raw.id || raw.thread_id,
+    threadId: raw.thread_id,
+    title: raw.title || 'Untitled conversation',
+    messages: [],
+    evidence: null,
+    steps: [],
+    updatedAt: raw.updated_at,
+  };
+}
+
+export function mapConversationDetail(
+  detail: ServerConversationDetail,
+  existingId?: string,
+  existingUpdatedAt?: string,
+): SavedConversation {
+  const messages: ChatMessage[] = (detail.messages ?? []).map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    evidence: m.evidence ?? null,
+    traceUrl: m.trace_url ?? null,
+    createdAt: m.created_at,
+  }));
+
+  const reverseAssistants = [...messages].reverse().filter((m) => m.role === 'assistant');
+  const latestWithEvidence = reverseAssistants.find(
+    (m) => Array.isArray(m.evidence) && m.evidence.length > 0,
+  );
+  const latestWithTrace = reverseAssistants.find((m) => Boolean(m.traceUrl));
+  const lastMsg = messages[messages.length - 1];
+
+  return {
+    id: existingId ?? detail.thread_id,
+    threadId: detail.thread_id,
+    title: detail.title || deriveTitle(messages.find((m) => m.role === 'user')?.content ?? ''),
+    messages,
+    evidence: latestWithEvidence?.evidence ?? reverseAssistants[0]?.evidence ?? null,
+    steps: [],
+    traceUrl: latestWithTrace?.traceUrl ?? undefined,
+    updatedAt: existingUpdatedAt ?? lastMsg?.createdAt ?? new Date().toISOString(),
+  };
+}
+
+export async function fetchConversations(signal?: AbortSignal): Promise<SavedConversation[]> {
+  const response = await fetch('/api/conversations', {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  if (response.status === 401) throw new UnauthorizedApiError();
+  if (!response.ok) {
+    throw new Error(`Failed to load conversations (${response.status}).`);
+  }
+  const body = (await response.json()) as { conversations?: ServerConversationSummary[] };
+  if (!Array.isArray(body.conversations)) return [];
+  return body.conversations.map(mapConversationSummary);
+}
+
+export async function fetchConversationDetail(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<SavedConversation> {
+  const response = await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  if (response.status === 401) throw new UnauthorizedApiError();
+  if (!response.ok) {
+    throw new Error(`Failed to load conversation (${response.status}).`);
+  }
+  const detail = (await response.json()) as ServerConversationDetail;
+  return mapConversationDetail(detail);
+}
+
+export async function deleteConversationRemote(threadId: string): Promise<void> {
+  const response = await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  if (response.status === 401) throw new UnauthorizedApiError();
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Failed to delete conversation (${response.status}).`);
+  }
 }
 
 export type HistoryGroup = { label: string; items: SavedConversation[] };
@@ -143,14 +210,6 @@ export function groupConversationsByDate(
   return buckets.filter((b) => b.items.length > 0);
 }
 
-export function clearConversations(handle: string): void {
-  try {
-    localStorage.removeItem(storageKeyForUser(handle));
-  } catch {
-    /* ignore */
-  }
-}
-
 export function conversationToMarkdown(conv: SavedConversation): string {
   const lines: string[] = [
     `# ${conv.title}`,
@@ -161,13 +220,24 @@ export function conversationToMarkdown(conv: SavedConversation): string {
     '---',
     '',
   ];
+  let exportedTurnEvidence = false;
   for (const msg of conv.messages) {
     lines.push(`### ${msg.role === 'user' ? 'You' : 'Assistant'}`);
     lines.push('');
     lines.push(msg.content);
     lines.push('');
+    if (msg.role === 'assistant' && msg.traceUrl) {
+      lines.push(`- **Execution Trace:** ${msg.traceUrl}`);
+      lines.push('');
+    }
+    if (msg.role === 'assistant' && msg.evidence && msg.evidence.length > 0) {
+      exportedTurnEvidence = true;
+      lines.push('#### Supporting Evidence', '', '```json');
+      lines.push(JSON.stringify(msg.evidence, null, 2));
+      lines.push('```', '');
+    }
   }
-  if (conv.evidence && conv.evidence.length > 0) {
+  if (!exportedTurnEvidence && conv.evidence && conv.evidence.length > 0) {
     lines.push('---', '', '### Retrieved Evidence (Raw MCP Records)', '', '```json');
     lines.push(JSON.stringify(conv.evidence, null, 2));
     lines.push('```', '');

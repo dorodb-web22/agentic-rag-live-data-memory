@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  clearConversations,
   deleteConversation,
+  deleteConversationRemote,
   deriveTitle,
-  loadActiveUser,
-  loadConversations,
-  saveActiveUser,
-  saveConversations,
+  fetchConversationDetail,
+  fetchConversations,
+  UnauthorizedApiError,
   upsertConversation,
   type ChatMessage,
   type EvidenceRecord,
   type SavedConversation,
 } from './chatStorage';
-import { mockStream } from './mockStream';
 import {
   applyStepEvent,
   closeRunningSteps,
@@ -21,8 +19,6 @@ import {
   type StreamEvent,
   type TraceStep,
 } from './streaming';
-
-export const IS_MOCK_STREAM = import.meta.env.VITE_MOCK_STREAM === 'true';
 
 let localIdSeq = 0;
 function makeId(prefix: string): string {
@@ -39,7 +35,12 @@ async function describeFailure(response: Response): Promise<string> {
   } catch {
     /* fall through to generic message */
   }
-  if (response.status === 422) return 'That question could not be processed. Try shortening or rephrasing it.';
+  if (response.status === 422) {
+    return 'That question could not be processed. Try shortening or rephrasing it.';
+  }
+  if (response.status === 429) {
+    return 'Rate limit reached. Please wait a moment and try again.';
+  }
   return `The request failed (${response.status}). Please try again.`;
 }
 
@@ -48,12 +49,16 @@ async function* fetchStream(
   threadId: string | null,
   signal: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
-  const response = await fetch('/query/stream', {
+  const response = await fetch('/api/query/stream', {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({ query, thread_id: threadId }),
     signal,
   });
+  if (response.status === 401) {
+    throw new UnauthorizedApiError();
+  }
   if (!response.ok || !response.body) {
     throw new Error(await describeFailure(response));
   }
@@ -75,12 +80,16 @@ async function* fetchStream(
   if (tail) yield tail;
 }
 
-export function useQueryStream() {
-  const [activeUser, setActiveUser] = useState<string>(() => loadActiveUser());
-  const [conversations, setConversations] = useState<SavedConversation[]>(() =>
-    loadConversations(loadActiveUser()),
-  );
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+export type UseQueryStreamOptions = {
+  enabled?: boolean;
+  onUnauthorized?: () => void;
+};
+
+export function useQueryStream(options: UseQueryStreamOptions = {}) {
+  const { enabled = true, onUnauthorized } = options;
+
+  const [conversations, setConversations] = useState<SavedConversation[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [evidence, setEvidence] = useState<EvidenceRecord[] | null>(null);
   const [steps, setSteps] = useState<TraceStep[]>([]);
@@ -88,95 +97,121 @@ export function useQueryStream() {
   const [traceUrl, setTraceUrl] = useState<string | undefined>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loadingThread, setLoadingThread] = useState(false);
   const [hasThread, setHasThread] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
-  const convIdRef = useRef<string | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
+  const conversationsRef = useRef<SavedConversation[]>([]);
   const abortRef = useRef<AbortController | null>(null);
-  const activeUserRef = useRef<string>(activeUser);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  const onUnauthorizedRef = useRef(onUnauthorized);
 
   useEffect(() => {
-    activeUserRef.current = activeUser;
-  }, [activeUser]);
+    onUnauthorizedRef.current = onUnauthorized;
+  }, [onUnauthorized]);
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
-  // Optional URL ?thread=<id> hydration from PostgreSQL backend
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const urlThread = params.get('thread')?.trim();
-    if (!urlThread) return;
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
-    const existing = conversations.find((c) => c.threadId === urlThread);
-    if (existing) {
-      convIdRef.current = existing.id;
-      setActiveConversationId(existing.id);
-      threadIdRef.current = existing.threadId;
-      setHasThread(Boolean(existing.threadId));
-      setMessages(existing.messages);
-      setEvidence(existing.evidence);
-      setSteps(existing.steps);
-      setTraceUrl(existing.traceUrl);
-      const lastAssistant = [...existing.messages].reverse().find((m) => m.role === 'assistant');
+  const selectConversation = useCallback(async (threadId: string) => {
+    if (!threadId) return;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
+
+    threadIdRef.current = threadId;
+    setActiveThreadId(threadId);
+    setHasThread(true);
+    setError('');
+    setLoading(false);
+
+    const cached = conversationsRef.current.find((c) => c.threadId === threadId);
+    if (cached && cached.messages.length > 0) {
+      messagesRef.current = cached.messages;
+      setMessages(cached.messages);
+      setEvidence(cached.evidence);
+      setSteps(cached.steps);
+      setTraceUrl(cached.traceUrl);
+      const lastAssistant = [...cached.messages].reverse().find((m) => m.role === 'assistant');
       setAnswer(lastAssistant?.content ?? '');
-      return;
+    } else {
+      setLoadingThread(true);
     }
 
-    if (IS_MOCK_STREAM) return;
-    fetch(`/threads/${encodeURIComponent(urlThread)}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then(
-        (
-          data: {
-            thread_id: string;
-            messages: { role: 'user' | 'assistant'; content: string }[];
-            evidence?: EvidenceRecord[] | null;
-          } | null,
-        ) => {
-          if (!data || !Array.isArray(data.messages) || data.messages.length === 0) return;
-          const now = new Date().toISOString();
-          const hydratedMessages: ChatMessage[] = data.messages.map((m) => ({
-            id: makeId('msg'),
-            role: m.role,
-            content: m.content,
-            createdAt: now,
-          }));
-          const firstUser = hydratedMessages.find((m) => m.role === 'user')?.content ?? data.thread_id;
-          const conv: SavedConversation = {
-            id: makeId('conv'),
-            threadId: data.thread_id,
-            title: deriveTitle(firstUser),
-            messages: hydratedMessages,
-            evidence: data.evidence ?? null,
-            steps: [],
-            updatedAt: now,
-          };
-          convIdRef.current = conv.id;
-          threadIdRef.current = conv.threadId;
-          setActiveConversationId(conv.id);
-          setHasThread(true);
-          setMessages(hydratedMessages);
-          setEvidence(conv.evidence);
-          const lastAssistant = [...hydratedMessages].reverse().find((m) => m.role === 'assistant');
-          setAnswer(lastAssistant?.content ?? '');
-          setConversations((prev) => {
-            const next = upsertConversation(prev, conv);
-            saveConversations(activeUserRef.current, next);
-            return next;
-          });
-        },
-      )
-      .catch(() => {
-        /* ignore offline hydration failure */
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    try {
+      const hydrated = await fetchConversationDetail(threadId, controller.signal);
+      if (controller.signal.aborted || threadIdRef.current !== threadId) return;
+      const merged: SavedConversation = {
+        ...hydrated,
+        id: cached?.id ?? hydrated.id,
+        updatedAt: cached?.updatedAt ?? hydrated.updatedAt,
+      };
+      messagesRef.current = merged.messages;
+      setMessages(merged.messages);
+      setEvidence(merged.evidence);
+      setSteps([]);
+      setTraceUrl(merged.traceUrl);
+      const lastAssistant = [...merged.messages].reverse().find((m) => m.role === 'assistant');
+      setAnswer(lastAssistant?.content ?? '');
+      setConversations((prev) =>
+        prev.some((c) => c.threadId === threadId)
+          ? prev.map((c) => (c.threadId === threadId ? merged : c))
+          : upsertConversation(prev, merged),
+      );
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof UnauthorizedApiError) {
+        onUnauthorizedRef.current?.();
+        return;
+      }
+      if (!cached || cached.messages.length === 0) {
+        setError(cause instanceof Error ? cause.message : 'Failed to load conversation.');
+      }
+    } finally {
+      if (detailAbortRef.current === controller) {
+        setLoadingThread(false);
+      }
+    }
   }, []);
+
+  // Load server-persisted conversations on sign-in, and hydrate optional ?thread=<id>
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+
+    fetchConversations(controller.signal)
+      .then((list) => {
+        if (controller.signal.aborted) return;
+        setConversations(list);
+        const params = new URLSearchParams(window.location.search);
+        const urlThread = params.get('thread')?.trim();
+        if (urlThread) {
+          void selectConversation(urlThread);
+        }
+      })
+      .catch((cause) => {
+        if (controller.signal.aborted) return;
+        if (cause instanceof UnauthorizedApiError) {
+          onUnauthorizedRef.current?.();
+        }
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [enabled, selectConversation]);
 
   const submit = useCallback(async (query: string): Promise<boolean> => {
     abortRef.current?.abort();
+    detailAbortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -204,10 +239,7 @@ export function useQueryStream() {
     let collectedSteps: TraceStep[] = [];
 
     try {
-      const source = IS_MOCK_STREAM
-        ? mockStream(query, threadIdRef.current, controller.signal)
-        : fetchStream(query, threadIdRef.current, controller.signal);
-      for await (const event of source) {
+      for await (const event of fetchStream(query, threadIdRef.current, controller.signal)) {
         if (controller.signal.aborted || abortRef.current !== controller) break;
         if (event.type === 'step') {
           collectedSteps = applyStepEvent(collectedSteps, event.data);
@@ -223,6 +255,7 @@ export function useQueryStream() {
           setEvidence(finalEvidence);
           if (event.data.thread_id) {
             threadIdRef.current = event.data.thread_id;
+            setActiveThreadId(event.data.thread_id);
             setHasThread(true);
           }
         } else if (event.type === 'error') {
@@ -235,6 +268,8 @@ export function useQueryStream() {
           id: makeId('msg'),
           role: 'assistant',
           content: finalAnswer,
+          evidence: finalEvidence,
+          traceUrl: finalTraceUrl ?? null,
           createdAt: new Date().toISOString(),
         };
         const completedMessages = [...pendingMessages, assistantMsg];
@@ -242,26 +277,45 @@ export function useQueryStream() {
         setMessages(completedMessages);
 
         const finalizedSteps = closeRunningSteps(collectedSteps);
-        const convId = convIdRef.current ?? makeId('conv');
-        convIdRef.current = convId;
-        setActiveConversationId(convId);
+        const resolvedThread = threadIdRef.current;
+        if (resolvedThread) {
+          setActiveThreadId(resolvedThread);
+          setHasThread(true);
+        }
 
+        const existing = resolvedThread
+          ? conversationsRef.current.find((c) => c.threadId === resolvedThread)
+          : undefined;
         const firstUserText = completedMessages.find((m) => m.role === 'user')?.content ?? query;
         const saved: SavedConversation = {
-          id: convId,
-          threadId: threadIdRef.current,
-          title: deriveTitle(firstUserText),
+          id: existing?.id ?? resolvedThread ?? makeId('conv'),
+          threadId: resolvedThread,
+          title: existing?.title ?? deriveTitle(firstUserText),
           messages: completedMessages,
           evidence: finalEvidence,
           steps: finalizedSteps,
           traceUrl: finalTraceUrl,
           updatedAt: new Date().toISOString(),
         };
-        setConversations((prev) => {
-          const next = upsertConversation(prev, saved);
-          saveConversations(activeUserRef.current, next);
-          return next;
-        });
+        setConversations((prev) => upsertConversation(prev, saved));
+
+        // Sync canonical server list (id, title, updated_at) in background
+        void fetchConversations()
+          .then((remoteList) => {
+            setConversations((prev) => {
+              const byThread = new Map(prev.map((c) => [c.threadId, c]));
+              return remoteList.map((remote) => {
+                const local = byThread.get(remote.threadId);
+                return local && local.messages.length > 0
+                  ? { ...remote, messages: local.messages, evidence: local.evidence, steps: local.steps, traceUrl: local.traceUrl }
+                  : remote;
+              });
+            });
+          })
+          .catch(() => {
+            /* ignore background list refresh errors */
+          });
+
         return true;
       }
 
@@ -273,9 +327,13 @@ export function useQueryStream() {
       messagesRef.current = priorMessages;
       setMessages(priorMessages);
       if (controller.signal.aborted) return false;
+      if (cause instanceof UnauthorizedApiError) {
+        onUnauthorizedRef.current?.();
+        return false;
+      }
       setError(
         cause instanceof TypeError
-          ? 'Could not connect to the backend. Check that the local API is running and try again.'
+          ? 'Could not connect to the backend. Check that the API is running and try again.'
           : cause instanceof Error
             ? cause.message
             : 'Something went wrong. Please try again.',
@@ -299,10 +357,11 @@ export function useQueryStream() {
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    detailAbortRef.current?.abort();
+    detailAbortRef.current = null;
     threadIdRef.current = null;
-    convIdRef.current = null;
     messagesRef.current = [];
-    setActiveConversationId(null);
+    setActiveThreadId(null);
     setHasThread(false);
     setMessages([]);
     setEvidence(null);
@@ -311,71 +370,81 @@ export function useQueryStream() {
     setTraceUrl(undefined);
     setError('');
     setLoading(false);
+    setLoadingThread(false);
   }, []);
 
-  const selectConversation = useCallback(
-    (id: string) => {
-      const target = conversations.find((c) => c.id === id);
-      if (!target) return;
-      abortRef.current?.abort();
-      abortRef.current = null;
-      convIdRef.current = target.id;
-      threadIdRef.current = target.threadId;
-      messagesRef.current = target.messages;
-      setActiveConversationId(target.id);
-      setHasThread(Boolean(target.threadId));
-      setMessages(target.messages);
-      setEvidence(target.evidence);
-      setSteps(target.steps);
-      setTraceUrl(target.traceUrl);
-      const lastAssistant = [...target.messages].reverse().find((m) => m.role === 'assistant');
-      setAnswer(lastAssistant?.content ?? '');
-      setError('');
-      setLoading(false);
+  const inspectTurn = useCallback(
+    (turnEvidence: EvidenceRecord[] | null | undefined, turnTraceUrl?: string | null) => {
+      if (turnEvidence !== undefined) {
+        setEvidence(turnEvidence);
+      }
+      setTraceUrl(turnTraceUrl ?? undefined);
     },
-    [conversations],
+    [],
   );
 
   const removeConversation = useCallback(
-    (id: string) => {
-      setConversations((prev) => {
-        const next = deleteConversation(prev, id);
-        saveConversations(activeUserRef.current, next);
-        return next;
-      });
-      if (convIdRef.current === id) {
+    async (threadId: string) => {
+      setConversations((prev) => deleteConversation(prev, threadId));
+      if (threadIdRef.current === threadId) {
         reset();
+      }
+      try {
+        await deleteConversationRemote(threadId);
+      } catch (cause) {
+        if (cause instanceof UnauthorizedApiError) {
+          onUnauthorizedRef.current?.();
+          return;
+        }
+        try {
+          const fresh = await fetchConversations();
+          setConversations(fresh);
+        } catch {
+          /* ignore */
+        }
       }
     },
     [reset],
   );
 
-  const clearAllConversations = useCallback(() => {
-    clearConversations(activeUserRef.current);
+  const clearAllConversations = useCallback(async () => {
+    const threadIds = conversationsRef.current
+      .map((c) => c.threadId)
+      .filter((id): id is string => Boolean(id));
     setConversations([]);
     reset();
+    const results = await Promise.allSettled(
+      threadIds.map((threadId) => deleteConversationRemote(threadId)),
+    );
+    if (results.some((r) => r.status === 'rejected' && r.reason instanceof UnauthorizedApiError)) {
+      onUnauthorizedRef.current?.();
+    }
   }, [reset]);
 
-  const switchUser = useCallback(
-    (nextHandle: string) => {
-      const normalized = saveActiveUser(nextHandle);
-      activeUserRef.current = normalized;
-      setActiveUser(normalized);
-      const loaded = loadConversations(normalized);
-      setConversations(loaded);
-      reset();
-    },
-    [reset],
-  );
+  const hydrateAllConversations = useCallback(async (): Promise<SavedConversation[]> => {
+    const current = conversationsRef.current;
+    const hydrated = await Promise.all(
+      current.map(async (conv) => {
+        if (conv.messages.length > 0 || !conv.threadId) return conv;
+        try {
+          const full = await fetchConversationDetail(conv.threadId);
+          return { ...full, id: conv.id, updatedAt: conv.updatedAt };
+        } catch {
+          return conv;
+        }
+      }),
+    );
+    return hydrated;
+  }, []);
 
   return {
-    activeUser,
-    switchUser,
     conversations,
-    activeConversationId,
+    activeThreadId,
     selectConversation,
     removeConversation,
     clearAllConversations,
+    hydrateAllConversations,
+    inspectTurn,
     messages,
     evidence,
     steps,
@@ -383,8 +452,8 @@ export function useQueryStream() {
     traceUrl,
     error,
     loading,
+    loadingThread,
     hasThread,
-    activeThreadId: threadIdRef.current,
     submit,
     stop,
     reset,

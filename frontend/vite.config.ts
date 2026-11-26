@@ -5,17 +5,14 @@ const apiOrigin = process.env.VITE_API_ORIGIN || 'http://localhost:8000';
 
 export default defineConfig({
   plugins: [react()],
+  css: {
+    postcss: {
+      plugins: [],
+    },
+  },
   server: {
     proxy: {
-      '/query': {
-        target: apiOrigin,
-        changeOrigin: true,
-      },
-      '/health': {
-        target: apiOrigin,
-        changeOrigin: true,
-      },
-      '/threads': {
+      '/api': {
         target: apiOrigin,
         changeOrigin: true,
       },

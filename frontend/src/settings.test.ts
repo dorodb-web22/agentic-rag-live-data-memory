@@ -6,7 +6,15 @@ import { DEFAULT_SETTINGS, SETTINGS_KEY, applyTheme, loadSettings, saveSettings 
 const NOW = new Date('2026-11-25T15:00:00');
 
 function conv(id: string, iso: string): SavedConversation {
-  return { id, threadId: null, title: id, messages: [], evidence: null, steps: [], updatedAt: iso };
+  return {
+    id,
+    threadId: `thread-${id}`,
+    title: id,
+    messages: [],
+    evidence: null,
+    steps: [],
+    updatedAt: iso,
+  };
 }
 
 beforeEach(() => {
@@ -25,7 +33,12 @@ describe('groupConversationsByDate', () => {
       ],
       NOW,
     );
-    expect(groups.map((g) => g.label)).toEqual(['Today', 'Yesterday', 'Previous 7 days', 'Older']);
+    expect(groups.map((g) => g.label)).toEqual([
+      'Today',
+      'Yesterday',
+      'Previous 7 days',
+      'Older',
+    ]);
     expect(groups.map((g) => g.items[0].id)).toEqual(['a', 'b', 'c', 'd']);
   });
 
@@ -43,12 +56,28 @@ describe('settings', () => {
     expect(loadSettings()).toEqual(DEFAULT_SETTINGS);
   });
 
-  it('round-trips valid settings and sanitizes unknown values', () => {
-    saveSettings({ theme: 'dark', displayName: 'Dorothy', showDetailsByDefault: true });
-    expect(loadSettings()).toEqual({ theme: 'dark', displayName: 'Dorothy', showDetailsByDefault: true });
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'neon', displayName: 5 }));
-    expect(loadSettings().theme).toBe('system');
-    expect(loadSettings().displayName).toBe('');
+  it('round-trips strictly UI preferences and purges legacy fake profile/chat keys', () => {
+    localStorage.setItem('agentic_rag.active_user.v1', 'dorothy');
+    localStorage.setItem('agentic_rag.chats.v1.dorothy', '[{"id":"old"}]');
+
+    saveSettings({ theme: 'dark', showDetailsByDefault: true, sidebarCollapsed: true });
+    expect(loadSettings()).toEqual({
+      theme: 'dark',
+      showDetailsByDefault: true,
+      sidebarCollapsed: true,
+    });
+    expect(localStorage.getItem('agentic_rag.active_user.v1')).toBeNull();
+    expect(localStorage.getItem('agentic_rag.chats.v1.dorothy')).toBeNull();
+
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ theme: 'neon', displayName: 'FakeProfile', sidebarCollapsed: 'yes' }),
+    );
+    expect(loadSettings()).toEqual({
+      theme: 'system',
+      showDetailsByDefault: false,
+      sidebarCollapsed: false,
+    });
   });
 
   it('applyTheme sets the data-theme attribute', () => {

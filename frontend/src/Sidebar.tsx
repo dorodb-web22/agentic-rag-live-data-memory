@@ -1,33 +1,34 @@
+import { useEffect, useState } from 'react';
+import type { AuthUser } from './auth';
 import { groupConversationsByDate, type SavedConversation } from './chatStorage';
 
-export type HealthState = 'online' | 'offline' | 'mock' | 'checking';
+export type HealthState = 'online' | 'offline' | 'checking';
 
 type Props = {
-  displayName: string;
+  user: AuthUser;
   conversations: SavedConversation[];
-  activeConversationId: string | null;
+  activeThreadId: string | null;
   activeView: 'home' | 'chat';
   health: HealthState;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onHome: () => void;
   onNewChat: () => void;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
+  onSelect: (threadId: string) => void;
+  onDelete: (threadId: string) => void;
   onOpenSettings: () => void;
 };
 
 const HEALTH_LABEL: Record<HealthState, string> = {
   online: 'Connected',
-  mock: 'Demo mode',
   offline: 'Offline',
   checking: 'Checking…',
 };
 
 export default function Sidebar({
-  displayName,
+  user,
   conversations,
-  activeConversationId,
+  activeThreadId,
   activeView,
   health,
   collapsed,
@@ -38,7 +39,15 @@ export default function Sidebar({
   onDelete,
   onOpenSettings,
 }: Props) {
+  const [avatarError, setAvatarError] = useState(false);
+
+  useEffect(() => {
+    setAvatarError(false);
+  }, [user.picture]);
+
   const groups = groupConversationsByDate(conversations);
+  const initial = (user.name || user.email || '?').trim().slice(0, 1).toUpperCase();
+  const showPicture = Boolean(user.picture) && !avatarError;
 
   return (
     <aside
@@ -46,10 +55,28 @@ export default function Sidebar({
       aria-label="Primary navigation"
     >
       <div className="sidebar-profile">
-        <span className="avatar" aria-hidden="true">
-          {displayName.slice(0, 1).toUpperCase()}
-        </span>
-        <span className="profile-name">{displayName}</span>
+        {showPicture ? (
+          <img
+            className="avatar avatar--img"
+            src={user.picture!}
+            alt={user.name}
+            referrerPolicy="no-referrer"
+            onError={() => setAvatarError(true)}
+            data-testid="user-avatar-img"
+          />
+        ) : (
+          <span className="avatar" aria-hidden="true" data-testid="user-avatar-fallback">
+            {initial}
+          </span>
+        )}
+        <div className="profile-meta">
+          <span className="profile-name" title={user.name}>
+            {user.name}
+          </span>
+          <span className="profile-email" title={user.email}>
+            {user.email}
+          </span>
+        </div>
         <button
           type="button"
           className="icon-btn"
@@ -79,7 +106,7 @@ export default function Sidebar({
       <div className="sidebar-history" aria-label="Saved chats">
         {conversations.length === 0 ? (
           <p className="history-empty">
-            Your chats are saved here automatically, so you can pick up where you left off.
+            Your chats are saved to your account automatically, so you can pick up on any device.
           </p>
         ) : (
           groups.map((group) => (
@@ -87,17 +114,23 @@ export default function Sidebar({
               <h3 className="history-group-label">{group.label}</h3>
               <ul className="history-list">
                 {group.items.map((conv) => {
-                  const isActive = activeView === 'chat' && conv.id === activeConversationId;
+                  const key = conv.threadId ?? conv.id;
+                  const isActive =
+                    activeView === 'chat' &&
+                    Boolean(activeThreadId) &&
+                    conv.threadId === activeThreadId;
                   return (
                     <li
-                      key={conv.id}
+                      key={key}
                       className={`history-row${isActive ? ' history-row--active' : ''}`}
                       data-testid="history-item"
                     >
                       <button
                         type="button"
                         className="history-open"
-                        onClick={() => onSelect(conv.id)}
+                        onClick={() => {
+                          if (conv.threadId) onSelect(conv.threadId);
+                        }}
                         title={conv.title}
                         aria-current={isActive ? 'page' : undefined}
                       >
@@ -106,7 +139,9 @@ export default function Sidebar({
                       <button
                         type="button"
                         className="history-remove"
-                        onClick={() => onDelete(conv.id)}
+                        onClick={() => {
+                          if (conv.threadId) onDelete(conv.threadId);
+                        }}
                         aria-label={`Delete chat: ${conv.title}`}
                         title="Delete chat"
                       >
@@ -122,7 +157,7 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-footer">
-        <div className="trust-card" role="status">
+        <div className="trust-card" role="status" data-testid="health-status">
           <span className={`health-dot health-dot--${health}`} aria-hidden="true" />
           <div>
             <strong>{HEALTH_LABEL[health]}</strong>

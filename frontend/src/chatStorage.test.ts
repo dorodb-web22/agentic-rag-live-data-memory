@@ -1,19 +1,19 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   conversationToMarkdown,
   deleteConversation,
+  deleteConversationRemote,
   deriveTitle,
-  loadActiveUser,
-  loadConversations,
-  saveActiveUser,
-  saveConversations,
+  fetchConversationDetail,
+  fetchConversations,
+  UnauthorizedApiError,
   upsertConversation,
   type SavedConversation,
 } from './chatStorage';
 
-beforeEach(() => {
-  localStorage.clear();
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 const sampleConv: SavedConversation = {
@@ -21,40 +21,161 @@ const sampleConv: SavedConversation = {
   threadId: 'thread-abc123',
   title: 'How much does Enterprise cost?',
   messages: [
-    { id: 'm1', role: 'user', content: 'How much does Enterprise cost?', createdAt: '2026-11-25T10:00:00Z' },
-    { id: 'm2', role: 'assistant', content: 'Enterprise costs $5,000 [Product-3].', createdAt: '2026-11-25T10:00:02Z' },
+    {
+      id: 'm1',
+      role: 'user',
+      content: 'How much does Enterprise cost?',
+      createdAt: '2026-11-25T10:00:00Z',
+    },
+    {
+      id: 'm2',
+      role: 'assistant',
+      content: 'Enterprise costs $5,000 [Product-3].',
+      evidence: [{ id: 3, name: 'Enterprise', price: 5000, category: 'Subscriptions' }],
+      traceUrl: 'https://smith.langchain.com/r/run-1',
+      createdAt: '2026-11-25T10:00:02Z',
+    },
   ],
   evidence: [{ id: 3, name: 'Enterprise', price: 5000, category: 'Subscriptions' }],
-  steps: [{ id: 's1', node: 'planner', status: 'done', startedAt: '2026-11-25T10:00:00Z', durationMs: 120 }],
+  steps: [],
+  traceUrl: 'https://smith.langchain.com/r/run-1',
   updatedAt: '2026-11-25T10:00:02Z',
 };
 
-describe('chatStorage', () => {
-  it('persists and isolates chat history per signed-in user handle', () => {
-    expect(loadActiveUser()).toBe('dorothy');
-    saveConversations('dorothy', [sampleConv]);
-    expect(loadConversations('dorothy')).toHaveLength(1);
-    expect(loadConversations('alok')).toHaveLength(0);
+describe('chatStorage (server-backed)', () => {
+  it('fetches conversations list with credentials included', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          conversations: [
+            {
+              id: 'c-1',
+              thread_id: 'thread-1',
+              title: 'Enterprise pricing',
+              updated_at: '2026-11-26T09:00:00Z',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
 
-    saveActiveUser('Alok');
-    expect(loadActiveUser()).toBe('alok');
+    const list = await fetchConversations();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/conversations',
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: 'c-1',
+      threadId: 'thread-1',
+      title: 'Enterprise pricing',
+      updatedAt: '2026-11-26T09:00:00Z',
+    });
   });
 
-  it('upserts most recent conversation first and deletes cleanly', () => {
-    const second: SavedConversation = { ...sampleConv, id: 'conv-2', title: 'Second chat' };
-    const list = upsertConversation([sampleConv], second);
-    expect(list.map((c) => c.id)).toEqual(['conv-2', 'conv-1']);
+  it('hydrates full conversation detail preserving every turn evidence and trace_url', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          thread_id: 'thread-1',
+          title: 'Multi-turn chat',
+          messages: [
+            {
+              id: 'm1',
+              role: 'user',
+              content: 'Enterprise price?',
+              evidence: null,
+              trace_url: null,
+              created_at: '2026-11-26T09:00:00Z',
+            },
+            {
+              id: 'm2',
+              role: 'assistant',
+              content: 'Costs $5,000 [Product-3].',
+              evidence: [{ id: 3, name: 'Enterprise', price: 5000 }],
+              trace_url: 'https://smith.langchain.com/r/turn-1',
+              created_at: '2026-11-26T09:00:01Z',
+            },
+            {
+              id: 'm3',
+              role: 'user',
+              content: 'Open issues?',
+              evidence: null,
+              trace_url: null,
+              created_at: '2026-11-26T09:01:00Z',
+            },
+            {
+              id: 'm4',
+              role: 'assistant',
+              content: 'Issue [GitHub-19] is open.',
+              evidence: [{ number: 19, title: 'Fix concurrency', state: 'open' }],
+              trace_url: 'https://smith.langchain.com/r/turn-2',
+              created_at: '2026-11-26T09:01:02Z',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
 
-    const afterDelete = deleteConversation(list, 'conv-2');
-    expect(afterDelete.map((c) => c.id)).toEqual(['conv-1']);
+    const detail = await fetchConversationDetail('thread-1');
+    expect(detail.messages).toHaveLength(4);
+    expect(detail.messages[1].evidence).toEqual([{ id: 3, name: 'Enterprise', price: 5000 }]);
+    expect(detail.messages[1].traceUrl).toBe('https://smith.langchain.com/r/turn-1');
+    expect(detail.messages[3].evidence).toEqual([
+      { number: 19, title: 'Fix concurrency', state: 'open' },
+    ]);
+    expect(detail.messages[3].traceUrl).toBe('https://smith.langchain.com/r/turn-2');
+    expect(detail.evidence).toEqual([{ number: 19, title: 'Fix concurrency', state: 'open' }]);
+    expect(detail.traceUrl).toBe('https://smith.langchain.com/r/turn-2');
   });
 
-  it('truncates long titles and exports full markdown with evidence', () => {
+  it('throws UnauthorizedApiError on 401 and sends DELETE with credentials', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('{}', { status: 401 }))
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+
+    await expect(fetchConversations()).rejects.toBeInstanceOf(UnauthorizedApiError);
+
+    await deleteConversationRemote('thread-xyz');
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/conversations/thread-xyz',
+      expect.objectContaining({ method: 'DELETE', credentials: 'include' }),
+    );
+  });
+
+  it('upserts by threadId without duplicating and deletes cleanly', () => {
+    const updatedSameThread: SavedConversation = {
+      ...sampleConv,
+      id: 'server-id-1',
+      title: 'Updated title',
+    };
+    const afterSameThread = upsertConversation([sampleConv], updatedSameThread);
+    expect(afterSameThread).toHaveLength(1);
+    expect(afterSameThread[0].title).toBe('Updated title');
+
+    const second: SavedConversation = {
+      ...sampleConv,
+      id: 'conv-2',
+      threadId: 'thread-def456',
+      title: 'Second chat',
+    };
+    const list = upsertConversation(afterSameThread, second);
+    expect(list.map((c) => c.threadId)).toEqual(['thread-def456', 'thread-abc123']);
+
+    const afterDelete = deleteConversation(list, 'thread-def456');
+    expect(afterDelete.map((c) => c.threadId)).toEqual(['thread-abc123']);
+  });
+
+  it('truncates long titles and exports full markdown with per-turn evidence and trace URL', () => {
     expect(deriveTitle('a'.repeat(80)).endsWith('…')).toBe(true);
     const md = conversationToMarkdown(sampleConv);
     expect(md).toContain('# How much does Enterprise cost?');
     expect(md).toContain('thread-abc123');
     expect(md).toContain('[Product-3]');
+    expect(md).toContain('https://smith.langchain.com/r/run-1');
     expect(md).toContain('"name": "Enterprise"');
   });
 });

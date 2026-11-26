@@ -1,4 +1,4 @@
-// Pure helpers for the /query/stream SSE contract (no React, easy to unit test).
+// Pure helpers for the /api/query/stream SSE contract (no React, easy to unit test).
 
 export type TraceNode = 'planner' | 'worker';
 
@@ -29,6 +29,7 @@ export function parseSseFrame(frame: string): StreamEvent | null {
   let type = '';
   const dataLines: string[] = [];
   for (const rawLine of frame.split(/\r?\n/)) {
+    if (rawLine.startsWith(':')) continue;
     if (rawLine.startsWith('event:')) type = rawLine.slice(6).trim();
     else if (rawLine.startsWith('data:')) dataLines.push(rawLine.slice(5).trimStart());
   }

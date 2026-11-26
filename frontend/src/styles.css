@@ -258,14 +258,42 @@ button {
   color: var(--ink);
 }
 
-.profile-name {
+.avatar--img {
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+.avatar--lg {
+  width: 38px;
+  height: 38px;
+  font-size: 15px;
+}
+
+.profile-meta {
   flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.profile-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 600;
+  line-height: 1.25;
+}
+
+.profile-email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.25;
 }
 
 .sidebar-nav {
@@ -434,11 +462,6 @@ button {
 .health-dot--online {
   background: var(--ok);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
-}
-
-.health-dot--mock {
-  background: var(--warn);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
 }
 
 .health-dot--offline {
@@ -1316,14 +1339,81 @@ button {
   font-size: 14px;
 }
 
-.field--inline {
-  grid-template-columns: 1fr auto;
-  align-items: end;
+.account-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
 }
 
-.field--inline label {
+.account-details {
+  flex: 1;
+  min-width: 0;
   display: grid;
-  gap: 6px;
+  gap: 2px;
+}
+
+.account-details strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.account-details span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.auth-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  background-color: var(--bg);
+  background-image: var(--bg-wash);
+}
+
+.auth-gate-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+
+.auth-gate-card h1 {
+  margin: 0;
+  font-family: var(--f-display);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.auth-gate-card p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.auth-gate-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .toggle-row {

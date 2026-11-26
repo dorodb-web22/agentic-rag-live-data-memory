@@ -1,7 +1,19 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { conversationToMarkdown, type SavedConversation } from './chatStorage';
+import {
+  fetchCurrentUser,
+  getFirstName,
+  getLandingUrl,
+  logoutCurrentUser,
+  redirectToLanding,
+  type AuthUser,
+} from './auth';
+import {
+  conversationToMarkdown,
+  type ChatMessage,
+  type SavedConversation,
+} from './chatStorage';
 import EvidencePanel, { recordCitationKey } from './EvidencePanel';
 import ExecutionTrace from './ExecutionTrace';
 import SettingsDialog from './SettingsDialog';
@@ -14,7 +26,7 @@ import {
   type Settings,
 } from './settings';
 import { linkifyCitations, MAX_QUERY_LENGTH } from './streaming';
-import { IS_MOCK_STREAM, useQueryStream } from './useQueryStream';
+import { useQueryStream } from './useQueryStream';
 
 const SUGGESTIONS = [
   { label: 'Pricing', text: 'How much does the Enterprise plan cost?' },
@@ -39,47 +51,100 @@ function downloadFile(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function App() {
+type AuthGateState =
+  | { status: 'checking' }
+  | { status: 'authenticated'; user: AuthUser }
+  | { status: 'unauthenticated' }
+  | { status: 'error'; message: string };
+
+type AppProps = {
+  onNavigate?: (url: string) => void;
+};
+
+export default function App({ onNavigate }: AppProps = {}) {
+  const [authState, setAuthState] = useState<AuthGateState>({ status: 'checking' });
+  const [signingOut, setSigningOut] = useState(false);
   const [query, setQuery] = useState('');
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() =>
     resolveTheme(loadSettings().theme),
   );
-  const [health, setHealth] = useState<HealthState>(IS_MOCK_STREAM ? 'mock' : 'checking');
+  const [health, setHealth] = useState<HealthState>('checking');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [highlightedCitation, setHighlightedCitation] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  const handleUnauthorized = useCallback(() => {
+    setAuthState({ status: 'unauthenticated' });
+    redirectToLanding(onNavigate);
+  }, [onNavigate]);
+
+  const checkSession = useCallback(
+    async (signal?: AbortSignal) => {
+      setAuthState({ status: 'checking' });
+      try {
+        const result = await fetchCurrentUser(signal);
+        if (signal?.aborted) return;
+        if (result.status === 'unauthenticated') {
+          setAuthState({ status: 'unauthenticated' });
+          redirectToLanding(onNavigate);
+          return;
+        }
+        setAuthState({ status: 'authenticated', user: result.user });
+      } catch (cause) {
+        if (signal?.aborted) return;
+        setAuthState({
+          status: 'error',
+          message:
+            cause instanceof Error
+              ? cause.message
+              : 'Could not verify your session. Check that the API is running.',
+        });
+      }
+    },
+    [onNavigate],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void checkSession(controller.signal);
+    return () => controller.abort();
+  }, [checkSession]);
+
+  const isAuthenticated = authState.status === 'authenticated';
+
   const {
-    activeUser,
-    switchUser,
     conversations,
-    activeConversationId,
+    activeThreadId,
     selectConversation,
     removeConversation,
     clearAllConversations,
+    hydrateAllConversations,
+    inspectTurn,
     messages,
     evidence,
     steps,
     traceUrl,
     error,
     loading,
+    loadingThread,
     hasThread,
-    activeThreadId,
     submit,
     stop,
     reset,
-  } = useQueryStream();
+  } = useQueryStream({
+    enabled: isAuthenticated,
+    onUnauthorized: handleUnauthorized,
+  });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
-  const displayName = settings.displayName.trim() || activeUser;
-  const view: 'home' | 'chat' = messages.length > 0 || loading ? 'chat' : 'home';
+  const view: 'home' | 'chat' =
+    messages.length > 0 || loading || loadingThread ? 'chat' : 'home';
 
-  // ---- theme ----
+  // ---- theme & persisted UI preferences ----
   useEffect(() => {
     setResolvedTheme(applyTheme(settings.theme));
     saveSettings(settings);
@@ -90,28 +155,25 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange);
   }, [settings]);
 
-  // ---- backend health ----
+  // ---- live /api/health/deep status ----
   useEffect(() => {
-    if (IS_MOCK_STREAM) {
-      setHealth('mock');
-      return;
-    }
+    if (!isAuthenticated) return;
     let cancelled = false;
     const check = async () => {
       try {
-        const res = await fetch('/health');
+        const res = await fetch('/api/health/deep', { credentials: 'include' });
         if (!cancelled) setHealth(res.ok ? 'online' : 'offline');
       } catch {
         if (!cancelled) setHealth('offline');
       }
     };
-    check();
+    void check();
     const id = setInterval(check, 15000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (typeof chatEndRef.current?.scrollIntoView === 'function') {
@@ -152,7 +214,10 @@ export default function App() {
     }
   }
 
-  function openCitation(citeKey: string) {
+  function openCitation(citeKey: string, msg?: ChatMessage) {
+    if (msg) {
+      inspectTurn(msg.evidence ?? null, msg.traceUrl ?? null);
+    }
     setHighlightedCitation(citeKey);
     setDetailsOpen(true);
     requestAnimationFrame(() => {
@@ -174,20 +239,22 @@ export default function App() {
   }
 
   function exportActiveChat() {
+    const existing = activeThreadId
+      ? conversations.find((c) => c.threadId === activeThreadId)
+      : undefined;
     const conv: SavedConversation | null =
-      conversations.find((c) => c.id === activeConversationId) ??
-      (messages.length > 0
+      messages.length > 0
         ? {
-            id: 'unsaved',
+            id: existing?.id ?? activeThreadId ?? 'unsaved',
             threadId: activeThreadId,
-            title: messages[0].content.slice(0, 48),
+            title: existing?.title ?? messages[0].content.slice(0, 48),
             messages,
             evidence,
             steps,
             traceUrl,
-            updatedAt: new Date().toISOString(),
+            updatedAt: existing?.updatedAt ?? new Date().toISOString(),
           }
-        : null);
+        : (existing ?? null);
     if (!conv) return;
     downloadFile(
       `agentic-rag-chat-${(conv.threadId ?? conv.id).slice(0, 8)}.md`,
@@ -196,21 +263,92 @@ export default function App() {
     );
   }
 
-  function exportAllChats() {
+  async function exportAllChats() {
+    if (authState.status !== 'authenticated') return;
+    const hydrated = await hydrateAllConversations();
+    const safeEmail = authState.user.email.split('@')[0] || 'account';
     downloadFile(
-      `agentic-rag-all-chats-${activeUser}.json`,
-      JSON.stringify(conversations, null, 2),
+      `agentic-rag-all-chats-${safeEmail}.json`,
+      JSON.stringify(hydrated, null, 2),
       'application/json;charset=utf-8',
     );
+  }
+
+  async function handleSignOut() {
+    setSigningOut(true);
+    try {
+      await logoutCurrentUser();
+    } catch {
+      /* proceed with client redirect even if network fails */
+    } finally {
+      setSigningOut(false);
+      setSettingsOpen(false);
+      setAuthState({ status: 'unauthenticated' });
+      redirectToLanding(onNavigate);
+    }
   }
 
   function toggleQuickTheme() {
     setSettings((prev) => ({ ...prev, theme: resolvedTheme === 'dark' ? 'light' : 'dark' }));
   }
 
+  function setSidebarCollapsed(collapsed: boolean) {
+    setSettings((prev) => ({ ...prev, sidebarCollapsed: collapsed }));
+  }
+
+  if (authState.status === 'checking') {
+    return (
+      <div className="auth-gate" role="status" data-testid="auth-checking">
+        <div className="auth-gate-card">
+          <div>
+            <span className="spinner" aria-hidden="true" />
+          </div>
+          <h1>Loading your workspace…</h1>
+          <p>Verifying your Google session.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authState.status === 'unauthenticated') {
+    return (
+      <div className="auth-gate" data-testid="auth-unauthenticated">
+        <div className="auth-gate-card">
+          <h1>Sign in required</h1>
+          <p>Redirecting you to the landing page to sign in with Google…</p>
+          <div className="auth-gate-actions">
+            <a className="btn" href={getLandingUrl()}>
+              Continue to landing page
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (authState.status === 'error') {
+    return (
+      <div className="auth-gate" role="alert" data-testid="auth-error">
+        <div className="auth-gate-card">
+          <h1>Could not verify session</h1>
+          <p>{authState.message}</p>
+          <div className="auth-gate-actions">
+            <button type="button" className="btn" onClick={() => void checkSession()}>
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const user = authState.user;
+  const firstName = getFirstName(user);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant')?.id;
   const activeTitle =
-    conversations.find((c) => c.id === activeConversationId)?.title ?? 'New chat';
+    (activeThreadId
+      ? conversations.find((c) => c.threadId === activeThreadId)?.title
+      : undefined) ?? 'New chat';
   const evidenceCount = evidence?.length ?? 0;
 
   const composer = (
@@ -248,27 +386,27 @@ export default function App() {
   return (
     <div className="app-shell">
       <Sidebar
-        displayName={displayName}
+        user={user}
         conversations={conversations}
-        activeConversationId={activeConversationId}
+        activeThreadId={activeThreadId}
         activeView={view}
         health={health}
-        collapsed={sidebarCollapsed}
+        collapsed={settings.sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed(true)}
         onHome={reset}
         onNewChat={() => {
           reset();
           composerRef.current?.focus();
         }}
-        onSelect={selectConversation}
-        onDelete={removeConversation}
+        onSelect={(threadId) => void selectConversation(threadId)}
+        onDelete={(threadId) => void removeConversation(threadId)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="workspace">
         <header className="topbar">
           <div className="topbar-left">
-            {sidebarCollapsed && (
+            {settings.sidebarCollapsed && (
               <button
                 type="button"
                 className="icon-btn"
@@ -317,7 +455,7 @@ export default function App() {
           {view === 'home' ? (
             <div className="home">
               <h2 className="welcome">
-                <span className="welcome-name">Welcome, {displayName}!</span>
+                <span className="welcome-name">Welcome, {firstName}!</span>
                 <span className="welcome-sub">How can I help you today?</span>
               </h2>
 
@@ -353,84 +491,118 @@ export default function App() {
             </div>
           ) : (
             <div className="conversation">
-              {messages.map((msg) => (
-                <article
-                  key={msg.id}
-                  className={`message message--${msg.role}`}
-                  data-testid={`chat-bubble-${msg.role}`}
-                >
-                  {msg.role === 'user' ? (
-                    <p className="message-text">{msg.content}</p>
-                  ) : (
-                    <>
-                      <div className="markdown">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            a: ({ node: _node, href, children, ...props }) =>
-                              href?.startsWith('#cite-') ? (
-                                <sup
-                                  className="cite"
-                                  role="button"
-                                  tabIndex={0}
-                                  title={`Source: ${href.slice(6)} — click to view`}
-                                  onClick={() => openCitation(href.slice(6))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter' || e.key === ' ') {
-                                      e.preventDefault();
-                                      openCitation(href.slice(6));
-                                    }
-                                  }}
-                                >
-                                  {children}
-                                </sup>
-                              ) : (
-                                <a {...props} href={href} target="_blank" rel="noopener noreferrer">
-                                  {children}
-                                </a>
+              {loadingThread && messages.length === 0 && (
+                <div className="message message--assistant message--pending" role="status">
+                  <span className="spinner" aria-hidden="true" />
+                  <span>Loading conversation…</span>
+                </div>
+              )}
+
+              {messages.map((msg) => {
+                const msgEvidence =
+                  msg.evidence !== undefined
+                    ? msg.evidence
+                    : msg.id === lastAssistantId
+                      ? evidence
+                      : null;
+                const msgTraceUrl =
+                  msg.traceUrl !== undefined
+                    ? msg.traceUrl
+                    : msg.id === lastAssistantId
+                      ? (traceUrl ?? null)
+                      : null;
+
+                return (
+                  <article
+                    key={msg.id}
+                    className={`message message--${msg.role}`}
+                    data-testid={`chat-bubble-${msg.role}`}
+                  >
+                    {msg.role === 'user' ? (
+                      <p className="message-text">{msg.content}</p>
+                    ) : (
+                      <>
+                        <div className="markdown">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              a: ({ node: _node, href, children, ...props }) =>
+                                href?.startsWith('#cite-') ? (
+                                  <sup
+                                    className="cite"
+                                    role="button"
+                                    tabIndex={0}
+                                    title={`Source: ${href.slice(6)} — click to view`}
+                                    onClick={() => openCitation(href.slice(6), msg)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        openCitation(href.slice(6), msg);
+                                      }
+                                    }}
+                                  >
+                                    {children}
+                                  </sup>
+                                ) : (
+                                  <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+                                    {children}
+                                  </a>
+                                ),
+                              table: ({ node: _node, ...props }) => (
+                                <div className="table-scroll">
+                                  <table {...props} />
+                                </div>
                               ),
-                            table: ({ node: _node, ...props }) => (
-                              <div className="table-scroll">
-                                <table {...props} />
-                              </div>
-                            ),
-                          }}
-                        >
-                          {linkifyCitations(msg.content)}
-                        </ReactMarkdown>
-                      </div>
-                      <footer className="message-meta">
-                        {msg.id === lastAssistantId && evidence && evidence.length > 0 && (
-                          <span className="grounded" data-testid="grounded-badge">
-                            ✓ Grounded in {evidence.length} source{evidence.length === 1 ? '' : 's'}
-                          </span>
-                        )}
-                        {msg.id === lastAssistantId &&
-                          evidence?.map((rec, idx) => {
+                            }}
+                          >
+                            {linkifyCitations(msg.content)}
+                          </ReactMarkdown>
+                        </div>
+                        <footer className="message-meta">
+                          {msgEvidence && msgEvidence.length > 0 && (
+                            <span className="grounded" data-testid="grounded-badge">
+                              ✓ Grounded in {msgEvidence.length} source
+                              {msgEvidence.length === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {msgEvidence?.map((rec, idx) => {
                             const key = recordCitationKey(rec, idx);
                             return (
                               <button
                                 key={key}
                                 type="button"
                                 className="source-chip"
-                                onClick={() => openCitation(key)}
+                                onClick={() => openCitation(key, msg)}
                               >
                                 {key}
                               </button>
                             );
                           })}
-                        <button
-                          type="button"
-                          className="text-btn"
-                          onClick={() => void copyMessage(msg.id, msg.content)}
-                        >
-                          {copiedId === msg.id ? 'Copied' : 'Copy'}
-                        </button>
-                      </footer>
-                    </>
-                  )}
-                </article>
-              ))}
+                          {msgTraceUrl && (
+                            <a
+                              className="source-chip"
+                              href={msgTraceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={() => inspectTurn(msgEvidence, msgTraceUrl)}
+                              data-testid="turn-trace-link"
+                            >
+                              Trace ↗
+                            </a>
+                          )}
+                          <button
+                            type="button"
+                            className="text-btn"
+                            onClick={() => void copyMessage(msg.id, msg.content)}
+                          >
+                            {copiedId === msg.id ? 'Copied' : 'Copy'}
+                          </button>
+                        </footer>
+                      </>
+                    )}
+                  </article>
+                );
+              })}
 
               {loading && (
                 <div className="message message--assistant message--pending" role="status">
@@ -501,13 +673,14 @@ export default function App() {
 
       <SettingsDialog
         open={settingsOpen}
+        user={user}
         settings={settings}
-        activeUser={activeUser}
         conversationCount={conversations.length}
+        signingOut={signingOut}
         onChange={setSettings}
-        onSwitchUser={switchUser}
-        onExportAll={exportAllChats}
-        onClearAll={clearAllConversations}
+        onSignOut={() => void handleSignOut()}
+        onExportAll={() => void exportAllChats()}
+        onClearAll={() => void clearAllConversations()}
         onClose={() => setSettingsOpen(false)}
       />
     </div>
