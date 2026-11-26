@@ -82,14 +82,18 @@ describe('applyStepEvent', () => {
 });
 
 describe('linkifyCitations', () => {
-  it('turns citation markers into cite links and leaves other brackets alone', () => {
-    expect(linkifyCitations('Costs $5000 [Product-3]. See [docs](http://x) and [note].')).toBe(
-      'Costs $5000 [Product-3](#cite-Product-3). See [docs](http://x) and [note].',
+  it('turns GitHub, Gmail, Notion, SQL, and Product citation markers into cite links', () => {
+    expect(
+      linkifyCitations(
+        'See [GitHub-42], [Gmail-18f3a9], [Notion-9b2c1d], [SQL-orders-7], and [Product-3]. Leave [docs](http://x) and [note].',
+      ),
+    ).toBe(
+      'See [GitHub-42](#cite-GitHub-42), [Gmail-18f3a9](#cite-Gmail-18f3a9), [Notion-9b2c1d](#cite-Notion-9b2c1d), [SQL-orders-7](#cite-SQL-orders-7), and [Product-3](#cite-Product-3). Leave [docs](http://x) and [note].',
     );
   });
 
   it('is idempotent', () => {
-    const once = linkifyCitations('a [Product-1]');
+    const once = linkifyCitations('a [SQL-orders-7] [Gmail-18f3]');
     expect(linkifyCitations(once)).toBe(once);
   });
 });

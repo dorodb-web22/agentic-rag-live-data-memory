@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -11,11 +11,19 @@ import {
 } from './auth';
 import {
   conversationToMarkdown,
+  UnauthorizedApiError,
   type ChatMessage,
   type SavedConversation,
 } from './chatStorage';
 import EvidencePanel, { recordCitationKey } from './EvidencePanel';
 import ExecutionTrace from './ExecutionTrace';
+import {
+  buildSuggestedPrompts,
+  fetchIntegrations,
+  getIntegrationConnectUrl,
+  type UserIntegrationItem,
+} from './integrations';
+import IntegrationsModal from './IntegrationsModal';
 import SettingsDialog from './SettingsDialog';
 import Sidebar, { type HealthState } from './Sidebar';
 import {
@@ -27,19 +35,6 @@ import {
 } from './settings';
 import { linkifyCitations, MAX_QUERY_LENGTH } from './streaming';
 import { useQueryStream } from './useQueryStream';
-
-const SUGGESTIONS = [
-  { label: 'Pricing', text: 'How much does the Enterprise plan cost?' },
-  { label: 'Compare', text: 'Compare Starter and Professional pricing' },
-  { label: 'Add-ons', text: 'What add-ons are available?' },
-  { label: 'Catalog', text: 'List all products in the database' },
-];
-
-const DATA_SOURCES = [
-  { name: 'SQLite · MCP', detail: 'Products & pricing', badge: 'Read-only' },
-  { name: 'GitHub · MCP', detail: 'Issues & pull requests', badge: 'Read-only' },
-  { name: 'PostgreSQL', detail: 'Conversation memory', badge: 'Per thread' },
-];
 
 function downloadFile(filename: string, content: string, type: string) {
   const blob = new Blob([content], { type });
@@ -70,6 +65,11 @@ export default function App({ onNavigate }: AppProps = {}) {
     resolveTheme(loadSettings().theme),
   );
   const [health, setHealth] = useState<HealthState>('checking');
+  const [integrations, setIntegrations] = useState<UserIntegrationItem[]>([]);
+  const [integrationsLoading, setIntegrationsLoading] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
+  const [focusedProvider, setFocusedProvider] = useState<string | null>(null);
+  const [connectedToast, setConnectedToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [highlightedCitation, setHighlightedCitation] = useState<string | null>(null);
@@ -114,6 +114,47 @@ export default function App({ onNavigate }: AppProps = {}) {
 
   const isAuthenticated = authState.status === 'authenticated';
 
+  const refreshIntegrations = useCallback(
+    async (signal?: AbortSignal) => {
+      setIntegrationsLoading(true);
+      try {
+        const items = await fetchIntegrations(signal);
+        if (!signal?.aborted) {
+          setIntegrations(items);
+        }
+      } catch (cause) {
+        if (signal?.aborted) return;
+        if (cause instanceof UnauthorizedApiError) {
+          handleUnauthorized();
+        }
+      } finally {
+        if (!signal?.aborted) {
+          setIntegrationsLoading(false);
+        }
+      }
+    },
+    [handleUnauthorized],
+  );
+
+  // Load registry-driven per-user integrations & handle ?connected=<provider> toast
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const controller = new AbortController();
+
+    const params = new URLSearchParams(window.location.search);
+    const connectedProvider = params.get('connected')?.trim();
+    if (connectedProvider) {
+      setConnectedToast(connectedProvider);
+      params.delete('connected');
+      const qs = params.toString();
+      const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', nextUrl);
+    }
+
+    void refreshIntegrations(controller.signal);
+    return () => controller.abort();
+  }, [isAuthenticated, refreshIntegrations]);
+
   const {
     conversations,
     activeThreadId,
@@ -143,6 +184,22 @@ export default function App({ onNavigate }: AppProps = {}) {
 
   const view: 'home' | 'chat' =
     messages.length > 0 || loading || loadingThread ? 'chat' : 'home';
+
+  const suggestedCards = useMemo(() => buildSuggestedPrompts(integrations, 4), [integrations]);
+  const connectedCount = useMemo(
+    () => integrations.filter((i) => i.status === 'connected').length,
+    [integrations],
+  );
+  const needsReauthItems = useMemo(
+    () => integrations.filter((i) => i.status === 'needs_reauth'),
+    [integrations],
+  );
+
+  const connectedToastLabel = useMemo(() => {
+    if (!connectedToast) return null;
+    const match = integrations.find((i) => i.provider === connectedToast);
+    return match?.display_name ?? connectedToast;
+  }, [connectedToast, integrations]);
 
   // ---- theme & persisted UI preferences ----
   useEffect(() => {
@@ -201,6 +258,20 @@ export default function App({ onNavigate }: AppProps = {}) {
     },
     [loading, submit, settings.showDetailsByDefault],
   );
+
+  function openIntegrationsHub(provider: string | null = null) {
+    setFocusedProvider(provider);
+    setIntegrationsOpen(true);
+  }
+
+  function connectOAuth(provider: string) {
+    const url = getIntegrationConnectUrl(provider);
+    if (onNavigate) {
+      onNavigate(url);
+    } else {
+      window.location.assign(url);
+    }
+  }
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -359,7 +430,7 @@ export default function App({ onNavigate }: AppProps = {}) {
         name="query"
         rows={1}
         aria-label="Ask a question"
-        placeholder="Ask about your products, issues, or earlier conversation…"
+        placeholder="Ask across your connected GitHub, Gmail, Notion, or SQLite data…"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         onKeyDown={onKeyDown}
@@ -391,6 +462,8 @@ export default function App({ onNavigate }: AppProps = {}) {
         activeThreadId={activeThreadId}
         activeView={view}
         health={health}
+        connectedIntegrationsCount={connectedCount}
+        needsReauthCount={needsReauthItems.length}
         collapsed={settings.sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed(true)}
         onHome={reset}
@@ -400,6 +473,7 @@ export default function App({ onNavigate }: AppProps = {}) {
         }}
         onSelect={(threadId) => void selectConversation(threadId)}
         onDelete={(threadId) => void removeConversation(threadId)}
+        onOpenIntegrations={() => openIntegrationsHub(null)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
@@ -452,6 +526,38 @@ export default function App({ onNavigate }: AppProps = {}) {
         </header>
 
         <main className="stage" aria-live="polite">
+          {connectedToastLabel && (
+            <div className="toast-banner toast-banner--stage" role="status" data-testid="connected-toast">
+              <span>✓ {connectedToastLabel} connected to your workspace.</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Dismiss notification"
+                onClick={() => setConnectedToast(null)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          {needsReauthItems.length > 0 && (
+            <div className="reauth-banner reauth-banner--stage" role="alert" data-testid="stage-reauth-banner">
+              <div>
+                <strong>Reconnection needed:</strong>{' '}
+                <span>
+                  {needsReauthItems.map((i) => i.display_name).join(', ')} needs re-authorization.
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn btn--xs"
+                onClick={() => connectOAuth(needsReauthItems[0].provider)}
+              >
+                Reconnect
+              </button>
+            </div>
+          )}
+
           {view === 'home' ? (
             <div className="home">
               <h2 className="welcome">
@@ -460,7 +566,7 @@ export default function App({ onNavigate }: AppProps = {}) {
               </h2>
 
               <section className="card-grid" aria-label="Suggested questions">
-                {SUGGESTIONS.map((s) => (
+                {suggestedCards.map((s) => (
                   <button
                     key={s.text}
                     type="button"
@@ -474,19 +580,97 @@ export default function App({ onNavigate }: AppProps = {}) {
               </section>
 
               <section className="sources-section" aria-label="Connected data sources">
-                <h3 className="section-label">Connected data sources</h3>
-                <ul className="source-grid">
-                  {DATA_SOURCES.map((source) => (
-                    <li key={source.name} className="source-card">
-                      <span className={`health-dot health-dot--${health}`} aria-hidden="true" />
-                      <div>
-                        <strong>{source.name}</strong>
-                        <span>{source.detail}</span>
-                      </div>
-                      <span className="chip-tag">{source.badge}</span>
-                    </li>
-                  ))}
-                </ul>
+                <div className="section-header-row">
+                  <h3 className="section-label">
+                    {connectedCount > 0
+                      ? `Integrations · ${connectedCount} connected`
+                      : 'Connect your data sources'}
+                  </h3>
+                  <button
+                    type="button"
+                    className="text-btn"
+                    onClick={() => openIntegrationsHub(null)}
+                  >
+                    Manage integrations
+                  </button>
+                </div>
+
+                {integrationsLoading && integrations.length === 0 ? (
+                  <p className="history-empty">Loading available integrations…</p>
+                ) : (
+                  <ul className="source-grid">
+                    {integrations.map((source) => {
+                      const isConnected = source.status === 'connected';
+                      const isNeedsReauth = source.status === 'needs_reauth';
+                      const isComingSoon = !source.available || source.status === 'coming_soon';
+
+                      return (
+                        <li
+                          key={source.provider}
+                          className={`source-card${
+                            isConnected ? ' source-card--interactive' : ''
+                          }${isComingSoon ? ' source-card--coming-soon' : ''}`}
+                          data-testid={`home-source-${source.provider}`}
+                          onClick={
+                            isConnected
+                              ? () => openIntegrationsHub(source.provider)
+                              : undefined
+                          }
+                        >
+                          <span
+                            className={`health-dot ${
+                              isConnected
+                                ? 'health-dot--online'
+                                : isNeedsReauth
+                                  ? 'health-dot--warn'
+                                  : ''
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <div>
+                            <strong>{source.display_name}</strong>
+                            <span>
+                              {isConnected && source.scope_summary
+                                ? source.scope_summary
+                                : source.description}
+                            </span>
+                          </div>
+                          {isComingSoon ? (
+                            <span className="chip-tag">Coming soon</span>
+                          ) : isNeedsReauth ? (
+                            <button
+                              type="button"
+                              className="btn btn--xs"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                connectOAuth(source.provider);
+                              }}
+                            >
+                              Reconnect
+                            </button>
+                          ) : isConnected ? (
+                            <span className="chip-tag">Connected</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn--xs"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (source.auth_type === 'upload') {
+                                  openIntegrationsHub(source.provider);
+                                } else {
+                                  connectOAuth(source.provider);
+                                }
+                              }}
+                            >
+                              + Connect
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </section>
             </div>
           ) : (
@@ -569,7 +753,7 @@ export default function App({ onNavigate }: AppProps = {}) {
                             const key = recordCitationKey(rec, idx);
                             return (
                               <button
-                                key={key}
+                                key={`${key}-${idx}`}
                                 type="button"
                                 className="source-chip"
                                 onClick={() => openCitation(key, msg)}
@@ -610,8 +794,10 @@ export default function App({ onNavigate }: AppProps = {}) {
                   <span>
                     {steps.length > 0 && steps[steps.length - 1].status === 'running'
                       ? steps[steps.length - 1].node === 'planner'
-                        ? 'Planning which source to use…'
-                        : 'Reviewing data and writing the answer…'
+                        ? 'Planning which connected tools to invoke…'
+                        : steps[steps.length - 1].node === 'tools'
+                          ? 'Querying connected tools in parallel…'
+                          : 'Synthesizing answer and validating citations…'
                       : 'Working on your answer…'}
                   </span>
                 </div>
@@ -671,14 +857,31 @@ export default function App({ onNavigate }: AppProps = {}) {
         />
       )}
 
+      <IntegrationsModal
+        open={integrationsOpen}
+        integrations={integrations}
+        initialProvider={focusedProvider}
+        onRefresh={() => refreshIntegrations()}
+        onConnectOAuth={(url) => {
+          if (onNavigate) onNavigate(url);
+          else window.location.assign(url);
+        }}
+        onClose={() => {
+          setIntegrationsOpen(false);
+          setFocusedProvider(null);
+        }}
+      />
+
       <SettingsDialog
         open={settingsOpen}
         user={user}
         settings={settings}
         conversationCount={conversations.length}
+        connectedIntegrationsCount={connectedCount}
         signingOut={signingOut}
         onChange={setSettings}
         onSignOut={() => void handleSignOut()}
+        onOpenIntegrations={() => openIntegrationsHub(null)}
         onExportAll={() => void exportAllChats()}
         onClearAll={() => void clearAllConversations()}
         onClose={() => setSettingsOpen(false)}
