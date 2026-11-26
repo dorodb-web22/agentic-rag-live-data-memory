@@ -1,13 +1,15 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { AuthUser } from './auth';
 import type { Settings, ThemeMode } from './settings';
 
 type Props = {
   open: boolean;
+  user: AuthUser;
   settings: Settings;
-  activeUser: string;
   conversationCount: number;
+  signingOut?: boolean;
   onChange: (next: Settings) => void;
-  onSwitchUser: (handle: string) => void;
+  onSignOut: () => void;
   onExportAll: () => void;
   onClearAll: () => void;
   onClose: () => void;
@@ -21,36 +23,38 @@ const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
 
 export default function SettingsDialog({
   open,
+  user,
   settings,
-  activeUser,
   conversationCount,
+  signingOut = false,
   onChange,
-  onSwitchUser,
+  onSignOut,
   onExportAll,
   onClearAll,
   onClose,
 }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
-  const [profileDraft, setProfileDraft] = useState(activeUser);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
+
+  useEffect(() => {
+    setAvatarError(false);
+  }, [user.picture]);
 
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
     if (open && !dialog.open) {
-      setProfileDraft(activeUser);
       setConfirmClear(false);
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.setAttribute('open', '');
     } else if (!open && dialog.open) {
       dialog.close();
     }
-  }, [open, activeUser]);
+  }, [open]);
 
-  function submitProfile(event: FormEvent) {
-    event.preventDefault();
-    if (profileDraft.trim() && profileDraft.trim() !== activeUser) onSwitchUser(profileDraft);
-  }
+  const initial = (user.name || user.email || '?').trim().slice(0, 1).toUpperCase();
+  const showPicture = Boolean(user.picture) && !avatarError;
 
   return (
     <dialog
@@ -89,30 +93,34 @@ export default function SettingsDialog({
         </section>
 
         <section className="settings-section">
-          <h3>Profile</h3>
-          <label className="field">
-            <span>Display name</span>
-            <input
-              type="text"
-              value={settings.displayName}
-              maxLength={40}
-              placeholder={activeUser}
-              onChange={(e) => onChange({ ...settings, displayName: e.target.value })}
-            />
-          </label>
-          <form className="field field--inline" onSubmit={submitProfile}>
-            <label>
-              <span>Signed in as (chat history is kept per profile)</span>
-              <input
-                type="text"
-                value={profileDraft}
-                onChange={(e) => setProfileDraft(e.target.value)}
+          <h3>Account</h3>
+          <div className="account-card">
+            {showPicture ? (
+              <img
+                className="avatar avatar--img avatar--lg"
+                src={user.picture!}
+                alt={user.name}
+                referrerPolicy="no-referrer"
+                onError={() => setAvatarError(true)}
               />
-            </label>
-            <button type="submit" className="btn btn--secondary">
-              Switch
+            ) : (
+              <span className="avatar avatar--lg" aria-hidden="true">
+                {initial}
+              </span>
+            )}
+            <div className="account-details">
+              <strong>{user.name}</strong>
+              <span>{user.email}</span>
+            </div>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={onSignOut}
+              disabled={signingOut}
+            >
+              {signingOut ? 'Signing out…' : 'Sign out'}
             </button>
-          </form>
+          </div>
         </section>
 
         <section className="settings-section">
@@ -134,9 +142,9 @@ export default function SettingsDialog({
         <section className="settings-section">
           <h3>Data &amp; privacy</h3>
           <p className="settings-note">
-            Saved chats live in this browser only. Agent memory for a conversation is stored
-            server-side in PostgreSQL under its thread ID. The agent has read-only access to
-            connected data sources.
+            Your chat history and conversation memory are stored privately in your account on
+            PostgreSQL and sync across devices. The agent has read-only access to connected data
+            sources.
           </p>
           <div className="settings-actions">
             <button
