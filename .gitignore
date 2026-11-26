@@ -1,0 +1,7 @@
+.venv/
+node_modules/
+nohup.out
+
+# Eval runner outputs (live run artefacts — not committed)
+backend/evals/results.json
+.deepeval/
