@@ -97,4 +97,34 @@ class GmailConnector(BaseConnector):
                 except httpx.HTTPError as exc:
                     logger.warning("Gmail message fetch error (%s): %s", msg_id, exc)
 
+        # Sprint 3: Best-effort pgvector + FTS hybrid indexing & retrieval scoped to user_id
+        user_id = getattr(self.integration, "user_id", None)
+        if self.db is not None and isinstance(user_id, str) and user_id.strip():
+            try:
+                from app.rag.hybrid_search import hybrid_search_chunks, ingest_connector_records
+
+                if records:
+                    await ingest_connector_records(
+                        self.db,
+                        user_id=user_id,
+                        provider="gmail",
+                        records=records,
+                    )
+                hybrid_hits = await hybrid_search_chunks(
+                    self.db,
+                    user_id=user_id,
+                    query=query,
+                    providers=["gmail"],
+                    top_k=15,
+                )
+                if hybrid_hits:
+                    seen = {r["citation_key"] for r in hybrid_hits if r.get("citation_key")}
+                    merged = list(hybrid_hits)
+                    for rec in records:
+                        if rec.get("citation_key") not in seen:
+                            merged.append(rec)
+                    return merged[:15]
+            except Exception as exc:
+                logger.debug("Gmail hybrid search skipped (%s); returning live records", type(exc).__name__)
+
         return records

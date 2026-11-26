@@ -136,7 +136,7 @@ async def get_user_connectors(
             # Auto-refresh Google tokens before instantiating
             if integ.provider in _GOOGLE_PROVIDERS:
                 tokens = await _maybe_refresh_google(tokens, integ, db)
-            connectors.append(cls(integration=integ, tokens=tokens))
+            connectors.append(cls(integration=integ, tokens=tokens, db=db))
         except Exception as exc:
             logger.warning("Failed to build connector for %s: %s", integ.provider, exc)
 
