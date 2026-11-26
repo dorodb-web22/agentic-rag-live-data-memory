@@ -533,14 +533,18 @@ class BasicAgent:
                     "answer": answer_text,
                     "evidence": final_state.get("evidence"),
                     "thread_id": resolved_thread_id,
+                    "run_id": run_id,
                 },
             }
         except GraphRecursionError as exc:
             logger.error("Graph recursion limit hit: %s", exc)
             yield {"event": "error", "data": {"message": str(_recursion_error())}}
+        except AgentError as exc:
+            logger.error("Agent error during stream execution: %s", exc)
+            yield {"event": "error", "data": {"message": str(exc)}}
         except Exception as exc:
             logger.exception("Agent stream execution failed: %s", exc)
-            yield {"event": "error", "data": {"message": str(exc)}}
+            yield {"event": "error", "data": {"message": f"LLM request failed ({type(exc).__name__})."}}
         finally:
             yield {"event": "done", "data": {}}
 

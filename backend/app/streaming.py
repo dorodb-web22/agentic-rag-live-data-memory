@@ -33,7 +33,8 @@ def sse_trace(run_id: str | None) -> str | None:
     try:
         import langsmith
 
-        client = langsmith.Client(api_key=api_key)
+        timeout_ms = int(os.getenv("LANGSMITH_TIMEOUT_MS", "3000"))
+        client = langsmith.Client(api_key=api_key, timeout_ms=timeout_ms)
         run = client.read_run(run_id.strip())
         url = getattr(run, "url", None)
         if not url:
