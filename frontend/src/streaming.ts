@@ -11,12 +11,23 @@ export type TraceStep = {
   durationMs?: number;
 };
 
+export type ConnectorWarning = {
+  tool?: string;
+  provider?: string;
+  message: string;
+};
+
 export type StreamEvent =
   | { type: 'step'; data: { node: string; status: 'start' | 'end'; timestamp: string } }
   | { type: 'trace'; data: { url: string } }
   | {
       type: 'answer';
-      data: { answer: string; evidence: Record<string, unknown>[] | null; thread_id: string | null };
+      data: {
+        answer: string;
+        evidence: Record<string, unknown>[] | null;
+        thread_id: string | null;
+        warnings?: ConnectorWarning[];
+      };
     }
   | { type: 'error'; data: { message: string } }
   | { type: 'done'; data: Record<string, never> };

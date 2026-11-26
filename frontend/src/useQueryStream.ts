@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  buildRateLimitError,
   deleteConversation,
   deleteConversationRemote,
   deriveTitle,
   fetchConversationDetail,
   fetchConversations,
+  RateLimitApiError,
   UnauthorizedApiError,
   upsertConversation,
   type ChatMessage,
@@ -16,6 +18,7 @@ import {
   closeRunningSteps,
   parseSseFrame,
   splitSseFrames,
+  type ConnectorWarning,
   type StreamEvent,
   type TraceStep,
 } from './streaming';
@@ -59,6 +62,9 @@ async function* fetchStream(
   if (response.status === 401) {
     throw new UnauthorizedApiError();
   }
+  if (response.status === 429) {
+    throw await buildRateLimitError(response);
+  }
   if (!response.ok || !response.body) {
     throw new Error(await describeFailure(response));
   }
@@ -92,10 +98,14 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [evidence, setEvidence] = useState<EvidenceRecord[] | null>(null);
+  const [warnings, setWarnings] = useState<ConnectorWarning[] | null>(null);
   const [steps, setSteps] = useState<TraceStep[]>([]);
   const [answer, setAnswer] = useState('');
   const [traceUrl, setTraceUrl] = useState<string | undefined>();
   const [error, setError] = useState('');
+  const [rateLimitMessage, setRateLimitMessage] = useState('');
+  const [rateLimitSecondsLeft, setRateLimitSecondsLeft] = useState(0);
+  const [lastFailedQuery, setLastFailedQuery] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
   const [hasThread, setHasThread] = useState(false);
@@ -119,6 +129,19 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
     conversationsRef.current = conversations;
   }, [conversations]);
 
+  useEffect(() => {
+    if (rateLimitSecondsLeft <= 0) return;
+    const timer = setInterval(() => {
+      setRateLimitSecondsLeft((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [rateLimitSecondsLeft]);
+
+  const dismissRateLimit = useCallback(() => {
+    setRateLimitMessage('');
+    setRateLimitSecondsLeft(0);
+  }, []);
+
   const selectConversation = useCallback(async (threadId: string) => {
     if (!threadId) return;
     abortRef.current?.abort();
@@ -131,6 +154,7 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
     setActiveThreadId(threadId);
     setHasThread(true);
     setError('');
+    setWarnings(null);
     setLoading(false);
 
     const cached = conversationsRef.current.find((c) => c.threadId === threadId);
@@ -170,6 +194,11 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
       if (controller.signal.aborted) return;
       if (cause instanceof UnauthorizedApiError) {
         onUnauthorizedRef.current?.();
+        return;
+      }
+      if (cause instanceof RateLimitApiError) {
+        setRateLimitMessage(cause.message);
+        setRateLimitSecondsLeft(cause.retryAfterSeconds);
         return;
       }
       if (!cached || cached.messages.length === 0) {
@@ -217,6 +246,9 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
 
     setLoading(true);
     setError('');
+    setRateLimitMessage('');
+    setRateLimitSecondsLeft(0);
+    setWarnings(null);
     setAnswer('');
     setSteps([]);
     setTraceUrl(undefined);
@@ -235,6 +267,7 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
     let answered = false;
     let finalAnswer = '';
     let finalEvidence: EvidenceRecord[] | null = null;
+    let finalWarnings: ConnectorWarning[] | null = null;
     let finalTraceUrl: string | undefined;
     let collectedSteps: TraceStep[] = [];
 
@@ -251,8 +284,13 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
           answered = true;
           finalAnswer = event.data.answer;
           finalEvidence = (event.data.evidence as EvidenceRecord[] | null) ?? null;
+          finalWarnings =
+            Array.isArray(event.data.warnings) && event.data.warnings.length > 0
+              ? event.data.warnings
+              : null;
           setAnswer(finalAnswer);
           setEvidence(finalEvidence);
+          setWarnings(finalWarnings);
           if (event.data.thread_id) {
             threadIdRef.current = event.data.thread_id;
             setActiveThreadId(event.data.thread_id);
@@ -260,16 +298,19 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
           }
         } else if (event.type === 'error') {
           setError(event.data.message);
+          setLastFailedQuery(query);
         }
       }
 
       if (!controller.signal.aborted && answered) {
+        setLastFailedQuery(null);
         const assistantMsg: ChatMessage = {
           id: makeId('msg'),
           role: 'assistant',
           content: finalAnswer,
           evidence: finalEvidence,
           traceUrl: finalTraceUrl ?? null,
+          warnings: finalWarnings,
           createdAt: new Date().toISOString(),
         };
         const completedMessages = [...pendingMessages, assistantMsg];
@@ -331,6 +372,12 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
         onUnauthorizedRef.current?.();
         return false;
       }
+      setLastFailedQuery(query);
+      if (cause instanceof RateLimitApiError) {
+        setRateLimitMessage(cause.message);
+        setRateLimitSecondsLeft(cause.retryAfterSeconds);
+        return false;
+      }
       setError(
         cause instanceof TypeError
           ? 'Could not connect to the backend. Check that the API is running and try again.'
@@ -346,6 +393,11 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
       }
     }
   }, []);
+
+  const retryLastQuery = useCallback(async (): Promise<boolean> => {
+    if (!lastFailedQuery) return false;
+    return submit(lastFailedQuery);
+  }, [lastFailedQuery, submit]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -365,10 +417,14 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
     setHasThread(false);
     setMessages([]);
     setEvidence(null);
+    setWarnings(null);
     setSteps([]);
     setAnswer('');
     setTraceUrl(undefined);
     setError('');
+    setRateLimitMessage('');
+    setRateLimitSecondsLeft(0);
+    setLastFailedQuery(null);
     setLoading(false);
     setLoadingThread(false);
   }, []);
@@ -423,17 +479,24 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
 
   const hydrateAllConversations = useCallback(async (): Promise<SavedConversation[]> => {
     const current = conversationsRef.current;
+    let sawUnauthorized = false;
     const hydrated = await Promise.all(
       current.map(async (conv) => {
         if (conv.messages.length > 0 || !conv.threadId) return conv;
         try {
           const full = await fetchConversationDetail(conv.threadId);
           return { ...full, id: conv.id, updatedAt: conv.updatedAt };
-        } catch {
+        } catch (cause) {
+          if (cause instanceof UnauthorizedApiError) {
+            sawUnauthorized = true;
+          }
           return conv;
         }
       }),
     );
+    if (sawUnauthorized) {
+      onUnauthorizedRef.current?.();
+    }
     return hydrated;
   }, []);
 
@@ -447,10 +510,16 @@ export function useQueryStream(options: UseQueryStreamOptions = {}) {
     inspectTurn,
     messages,
     evidence,
+    warnings,
     steps,
     answer,
     traceUrl,
     error,
+    rateLimitMessage,
+    rateLimitSecondsLeft,
+    lastFailedQuery,
+    dismissRateLimit,
+    retryLastQuery,
     loading,
     loadingThread,
     hasThread,

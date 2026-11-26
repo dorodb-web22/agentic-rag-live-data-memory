@@ -453,3 +453,42 @@ def test_stream_endpoint_multi_turn_persists_memory() -> None:
     finally:
         app.dependency_overrides.clear()
 
+
+def test_async_sse_contract_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from app.streaming import (
+        KEEPALIVE_INTERVAL_SECONDS,
+        aresolve_trace_url,
+        sse_keepalive,
+        sse_trace_from_url,
+    )
+
+    assert KEEPALIVE_INTERVAL_SECONDS == 15.0
+    assert sse_keepalive() == ": keepalive\n\n"
+    assert sse_trace_from_url(None) is None
+    assert sse_trace_from_url("") is None
+
+    trace_frame = sse_trace_from_url("https://smith.langchain.com/r/abc")
+    assert trace_frame is not None
+    assert _parse_sse_events(trace_frame) == [
+        ("trace", {"url": "https://smith.langchain.com/r/abc"})
+    ]
+
+    # sse_answer omits warnings when None/empty and includes warnings when provided
+    plain_ans = _parse_sse_events(sse_answer("ok", None, "t1"))[0][1]
+    assert "warnings" not in plain_ans
+
+    warn_ans = _parse_sse_events(
+        sse_answer(
+            "ok [GitHub-1]",
+            [{"citation_key": "GitHub-1"}],
+            "t1",
+            warnings=[{"provider": "gmail", "message": "timeout"}],
+        )
+    )[0][1]
+    assert warn_ans["warnings"] == [{"provider": "gmail", "message": "timeout"}]
+
+    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+    assert asyncio.run(aresolve_trace_url("run-123")) is None
+
+

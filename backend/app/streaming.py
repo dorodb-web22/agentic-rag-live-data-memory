@@ -78,8 +78,20 @@ def sse_trace_from_url(trace_url: str | None) -> str | None:
     return _sse("trace", {"url": trace_url})
 
 
-def sse_answer(answer: str, evidence: list[dict[str, Any]] | None, thread_id: str | None) -> str:
-    return _sse("answer", {"answer": answer or "", "evidence": evidence, "thread_id": thread_id})
+def sse_answer(
+    answer: str,
+    evidence: list[dict[str, Any]] | None,
+    thread_id: str | None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "answer": answer or "",
+        "evidence": evidence,
+        "thread_id": thread_id,
+    }
+    if warnings:
+        payload["warnings"] = warnings
+    return _sse("answer", payload)
 
 
 def sse_error(message: str) -> str:

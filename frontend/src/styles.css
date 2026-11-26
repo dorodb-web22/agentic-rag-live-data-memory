@@ -1676,9 +1676,85 @@ button {
 }
 
 .toast-banner--stage,
-.reauth-banner--stage {
+.reauth-banner--stage,
+.error-box--stage {
   width: min(100%, 780px);
   margin: 0 auto 16px;
+}
+
+.banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.error-box-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.rate-limit-banner div:first-child {
+  align-items: center;
+}
+
+.partial-warning-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+  font-size: 12.5px;
+}
+
+.partial-warning-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.partial-warning-body strong {
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.partial-warning-body span {
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+
+.empty-sources-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.empty-sources-card div {
+  display: grid;
+  gap: 3px;
+  font-size: 13.5px;
+}
+
+.empty-sources-card div span {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
 }
 
 .reauth-banner {

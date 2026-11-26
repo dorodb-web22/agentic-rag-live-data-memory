@@ -376,7 +376,12 @@ async def api_stream_agent(
                     trace_frame = sse_trace_from_url(trace_url)
                     if trace_frame:
                         yield trace_frame
-                    yield sse_answer(answer_text, evidence, turn_tid)
+                    yield sse_answer(
+                        answer_text,
+                        evidence,
+                        turn_tid,
+                        warnings=data.get("warnings"),
+                    )
 
                 elif event == "error":
                     yield sse_error(data.get("message", "Unknown error"))
