@@ -30,9 +30,11 @@ class BaseConnector(ABC):
         self,
         integration: UserIntegration | None = None,
         tokens: dict[str, Any] | None = None,
+        db: Any | None = None,
     ) -> None:
         self.integration = integration
         self.tokens: dict[str, Any] = tokens or {}
+        self.db = db
 
     # ── Abstract ─────────────────────────────────────────────────────────────
     @abstractmethod

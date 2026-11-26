@@ -1,0 +1,97 @@
+# Production Single-Origin Stack:
+#   - gateway  : Nginx serving `/` (landing), `/app` (React SPA), `/api/*` (FastAPI SSE)
+#   - backend  : FastAPI + LangGraph + Alembic + pgvector hybrid RAG + Redis rate limiter
+#   - postgres : PostgreSQL 16 + pgvector extension
+#   - redis    : Redis 7 for sliding-window rate limits & daily token quotas
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml --env-file backend/.env up -d --build
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-agentic_rag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-agentic_rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-agentic_rag}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_ENABLED: "1"
+      RATE_LIMIT_REQUESTS_PER_MINUTE: ${RATE_LIMIT_REQUESTS_PER_MINUTE:-20}
+      DAILY_TOKEN_QUOTA: ${DAILY_TOKEN_QUOTA:-100000}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET (32+ chars) is required}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required}
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost}
+      APP_BASE_URL: ${PUBLIC_ORIGIN:-http://localhost}
+      FRONTEND_URL: ${PUBLIC_ORIGIN:-http://localhost}
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost}
+      CSRF_TRUSTED_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      NOTION_OAUTH_CLIENT_ID: ${NOTION_OAUTH_CLIENT_ID:-}
+      NOTION_OAUTH_CLIENT_SECRET: ${NOTION_OAUTH_CLIENT_SECRET:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-agentic-rag-live-data-memory}
+      SQLITE_UPLOAD_DIR: /app/uploads
+    volumes:
+      - sqlite_uploads:/app/uploads
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway
+      args:
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+volumes:
+  pgdata:
+  redisdata:
+  sqlite_uploads:

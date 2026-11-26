@@ -143,9 +143,11 @@ app.add_middleware(
 # Auth, Multi-tenant Conversations & Integrations routes (Alok owns routers)
 # ---------------------------------------------------------------------------
 from app.middleware.csrf import CSRFOriginMiddleware  # noqa: E402
+from app.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 from app.routes.auth import router as auth_router  # noqa: E402
 from app.routes.conversations import router as conv_router  # noqa: E402
 
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(CSRFOriginMiddleware)
 app.include_router(auth_router, prefix="/api")
 app.include_router(conv_router, prefix="/api")

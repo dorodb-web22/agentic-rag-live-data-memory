@@ -323,5 +323,17 @@ async def delete_integration(
             except OSError:
                 pass
 
+    # Purge indexed pgvector/FTS document chunks for this user + provider (Sprint 3)
+    try:
+        from app.rag.hybrid_search import delete_user_provider_chunks
+
+        await delete_user_provider_chunks(
+            db,
+            user_id=user["user_id"],
+            provider=provider,
+        )
+    except Exception as exc:
+        logger.warning("Document chunk cleanup skipped (non-fatal): %s", exc)
+
     await db.delete(integ)
     return {"ok": True}
