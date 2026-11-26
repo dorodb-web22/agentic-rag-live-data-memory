@@ -1,7 +1,10 @@
 """GitHub connector — read-only OAuth: issues, PRs, commits, and repositories.
 
-OAuth scopes requested: repo (read-only public + private repos)
-  Alternatively: public_repo for public-only access.
+OAuth scope requested: `repo`.
+  NOTE: GitHub OAuth Apps have no read-only scope for private repositories, so the
+  issued token technically allows writes. This connector only ever issues GET
+  requests; a GitHub App with fine-grained read-only permissions is the way to
+  make the token itself read-only. `public_repo` limits access to public repos.
 
 Each user connects their own GitHub account.
 Required env vars:
@@ -29,16 +32,33 @@ GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 _PR_KEYWORDS = {"pull request", "pull requests", "pr", "prs", "merge", "merged"}
-_COMMIT_KEYWORDS = {"commit", "commits", "history", "pushed"}
+_COMMIT_KEYWORDS = {"commit", "commits", "pushed"}
+_WANTS_ALL_PR_STATES = {"recent", "latest", "merged", "closed", "all", "new", "last"}
 _GITHUB_URL_RE = re.compile(
     r"github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:[/?#\s]|$)",
     re.IGNORECASE,
 )
-_SAFE_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+_REPO_SHAPE_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+
+
+def _is_safe_repo(slug: str) -> bool:
+    """True for a well-formed `owner/repo` slug.
+
+    Rejects dot-only segments (`.` / `..`): they match the character class but
+    httpx normalises `/repos/../../user` to `/user`, which would let a crafted
+    query reach endpoints other than the repo ones we intend to call.
+    """
+    if not _REPO_SHAPE_RE.match(slug):
+        return False
+    return all(part.strip(".") for part in slug.split("/"))
 
 
 def _app_base_url() -> str:
     return os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def _has_keyword(text: str, keywords: set[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(kw)}\b", text) for kw in keywords)
 
 
 def _extract_repos_from_query(query: str) -> list[str]:
@@ -48,16 +68,35 @@ def _extract_repos_from_query(query: str) -> list[str]:
         slug = match.group(1).strip("/")
         if slug.endswith(".git"):
             slug = slug[:-4]
-        if _SAFE_REPO_RE.match(slug) and slug not in found:
+        if _is_safe_repo(slug) and slug not in found:
             found.append(slug)
     return found
+
+
+def _dedupe_citation_keys(records: list[dict[str, Any]]) -> None:
+    """Make citation keys unique when several repos are queried at once.
+
+    Issue/PR numbers restart per repo, so `GitHub-12` can exist in two repos.
+    The agent keeps an explicit `citation_key` verbatim, so a collision would make
+    two different sources share one citation chip. The first occurrence keeps the
+    contract key `GitHub-{number}`; later ones become `GitHub-{repo}-{number}`.
+    """
+    seen: set[str] = set()
+    for rec in records:
+        key = str(rec.get("citation_key") or "")
+        if key in seen:
+            repo_name = str(rec.get("repo") or "repo").split("/")[-1]
+            suffix = key.removeprefix("GitHub-")
+            key = f"GitHub-{repo_name}-{suffix}"
+            rec["citation_key"] = key
+        seen.add(key)
 
 
 def build_github_auth_url(state: str) -> str:
     params = {
         "client_id": os.environ["GITHUB_OAUTH_CLIENT_ID"],
         "redirect_uri": f"{_app_base_url()}/api/integrations/github/callback",
-        "scope": "repo",  # read-only repos, issues, PRs, commits
+        "scope": "repo",  # connector only issues GETs; token itself is not read-only (see module docstring)
         "state": state,
     }
     return GITHUB_AUTH_URL + "?" + urllib.parse.urlencode(params)
@@ -117,7 +156,7 @@ async def _discover_user_repos(
         discovered: list[str] = []
         for item in resp.json():
             full_name = str(item.get("full_name") or "").strip()
-            if _SAFE_REPO_RE.match(full_name) and full_name not in discovered:
+            if _is_safe_repo(full_name) and full_name not in discovered:
                 discovered.append(full_name)
                 if len(discovered) >= limit:
                     break
@@ -155,19 +194,15 @@ class GitHubConnector(BaseConnector):
         }
 
         query_lower = (query or "").lower()
-        fetch_commits = any(
-            re.search(rf"\b{re.escape(kw)}\b", query_lower) for kw in _COMMIT_KEYWORDS
-        )
-        fetch_prs = not fetch_commits and any(
-            re.search(rf"\b{re.escape(kw)}\b", query_lower) for kw in _PR_KEYWORDS
-        )
+        fetch_commits = _has_keyword(query_lower, _COMMIT_KEYWORDS)
+        fetch_prs = not fetch_commits and _has_keyword(query_lower, _PR_KEYWORDS)
 
         # Priority: explicit GitHub URL in query -> user-configured repos -> auto-discovered repos
         url_repos = _extract_repos_from_query(query)
         configured_repos: list[str] = [
             r.strip()
             for r in (self.integration.config.get("repos", []) if self.integration else [])
-            if isinstance(r, str) and _SAFE_REPO_RE.match(r.strip())
+            if isinstance(r, str) and _is_safe_repo(r.strip())
         ]
 
         records: list[dict[str, Any]] = []
@@ -189,6 +224,7 @@ class GitHubConnector(BaseConnector):
                 else:
                     await self._fetch_repo_issues(client, headers, repo, records)
 
+        _dedupe_citation_keys(records)
         return records
 
     async def _fetch_repo_commits(
@@ -241,8 +277,7 @@ class GitHubConnector(BaseConnector):
         query_lower: str,
         records: list[dict[str, Any]],
     ) -> None:
-        wants_all = any(w in query_lower for w in ("recent", "latest", "merged", "closed", "all", "new", "last"))
-        state = "all" if wants_all else "open"
+        state = "all" if _has_keyword(query_lower, _WANTS_ALL_PR_STATES) else "open"
         try:
             resp = await client.get(
                 f"{GITHUB_API}/repos/{repo}/pulls",
@@ -299,6 +334,10 @@ class GitHubConnector(BaseConnector):
                 return
             resp.raise_for_status()
             for item in resp.json():
+                # GitHub's /issues endpoint also returns pull requests; those are
+                # served by the PR path, so skip them to keep "issues" accurate.
+                if item.get("pull_request"):
+                    continue
                 num = item.get("number")
                 records.append(
                     {

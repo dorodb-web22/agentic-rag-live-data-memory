@@ -176,6 +176,81 @@ async def test_github_connector_auto_discovers_repos_when_config_empty() -> None
     assert results[0]["state"] == "merged"
 
 
+def test_github_rejects_dot_segment_repo_slugs() -> None:
+    """`../..` must never be accepted: httpx would normalise it to `/user/...`."""
+    from app.integrations.github import _extract_repos_from_query, _is_safe_repo
+
+    assert not _is_safe_repo("../..")
+    assert not _is_safe_repo("./.")
+    assert not _is_safe_repo("owner/..")
+    assert _is_safe_repo("dorodb-web22/agentic-rag-live-data-memory")
+    assert _is_safe_repo("owner/repo.js")
+    assert _extract_repos_from_query("see github.com/../.. now") == []
+
+
+def test_github_keyword_detection_has_no_false_positives() -> None:
+    from app.integrations.github import (
+        _COMMIT_KEYWORDS,
+        _WANTS_ALL_PR_STATES,
+        _has_keyword,
+    )
+
+    assert not _has_keyword("show my chat history", _COMMIT_KEYWORDS)
+    assert _has_keyword("how many commits are there", _COMMIT_KEYWORDS)
+    # "all" must match as a word, not inside "small"
+    assert not _has_keyword("any small prs", _WANTS_ALL_PR_STATES)
+    assert _has_keyword("show all prs", _WANTS_ALL_PR_STATES)
+
+
+def test_github_citation_keys_are_unique_across_repos() -> None:
+    from app.integrations.github import _dedupe_citation_keys
+
+    records = [
+        {"citation_key": "GitHub-12", "repo": "acme/alpha", "number": 12},
+        {"citation_key": "GitHub-12", "repo": "acme/beta", "number": 12},
+        {"citation_key": "GitHub-7", "repo": "acme/beta", "number": 7},
+    ]
+    _dedupe_citation_keys(records)
+    keys = [r["citation_key"] for r in records]
+    assert keys == ["GitHub-12", "GitHub-beta-12", "GitHub-7"]
+    assert len(set(keys)) == len(keys)
+
+
+@pytest.mark.asyncio
+async def test_github_issues_exclude_pull_requests() -> None:
+    from app.integrations.github import GitHubConnector
+
+    integ = _make_db_integration("github")
+    integ.config = {"repos": ["acme/alpha"]}
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = [
+        {"number": 1, "title": "Real issue", "state": "open", "html_url": "u1", "user": {"login": "a"}, "body": ""},
+        {
+            "number": 2,
+            "title": "A PR listed by the issues API",
+            "state": "open",
+            "html_url": "u2",
+            "user": {"login": "b"},
+            "body": "",
+            "pull_request": {"url": "https://api.github.com/repos/acme/alpha/pulls/2"},
+        },
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=resp)
+
+    connector = GitHubConnector(integration=integ, tokens={"access_token": "t"})
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch("which issues are open?")
+
+    assert [r["number"] for r in results] == [1]
+
+
 # ── Gmail ─────────────────────────────────────────────────────────────────────
 
 
