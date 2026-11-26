@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Frontend build dependencies and output
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Environment variables
+.env
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+backend/data/*.db
+
+# macOS
+.DS_Store
+
+# Eval runner outputs (live run artefacts — not committed)
+backend/evals/results.json
+.deepeval/

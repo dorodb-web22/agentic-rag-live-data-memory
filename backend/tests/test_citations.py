@@ -1,0 +1,162 @@
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+
+from app.agent import (
+    BasicAgent,
+    _build_citation_index,
+    _validate_citations,
+    create_agent_graph,
+    worker_node,
+)
+
+
+class FakeLLM:
+    def __init__(self, answer: str | list[str] = "A mock LLM answer.") -> None:
+        self.inputs: list[object] = []
+        if isinstance(answer, list):
+            self._answers = list(answer)
+        else:
+            self._answers = [answer]
+        self._index = 0
+
+    def invoke(self, input: object) -> AIMessage:
+        self.inputs.append(input)
+        ans = self._answers[min(self._index, len(self._answers) - 1)]
+        self._index += 1
+        return AIMessage(content=ans)
+
+
+def test_build_citation_index_uses_id_field() -> None:
+    records = [{"id": 3, "name": "Enterprise", "price": 5000.0, "category": "Subscriptions"}]
+    index = _build_citation_index(records)
+    assert index == {"Product-3": "3"}
+
+
+def test_build_citation_index_fallback_for_missing_id() -> None:
+    records = [
+        {"name": "Custom Tier", "price": 100.0},
+        {"id": 7, "name": "Support Tier", "price": 200.0},
+    ]
+    index = _build_citation_index(records)
+    assert index == {"Product-row0": "row0", "Product-7": "7"}
+
+
+def test_validate_citations_keeps_valid_marker() -> None:
+    records = [{"id": 3, "name": "Enterprise"}]
+    answer = "The Enterprise tier costs $5000 [Product-3]."
+    validated = _validate_citations(answer, records)
+    assert validated == "The Enterprise tier costs $5000 [Product-3]."
+
+
+def test_validate_citations_strips_fabricated_marker() -> None:
+    records = [{"id": 3, "name": "Enterprise"}]
+    answer = "The Enterprise tier costs $5000 [Product-99]."
+    validated = _validate_citations(answer, records)
+    assert "[Product-99]" not in validated
+    assert "costs $5000." in validated
+
+
+def test_validate_citations_strips_all_on_empty_records() -> None:
+    records: list[dict[str, Any]] = []
+    answer = "No products found [Product-1] or [Product-2]."
+    validated = _validate_citations(answer, records)
+    assert "[Product-1]" not in validated
+    assert "[Product-2]" not in validated
+
+
+def test_validate_citations_multiple_markers_mixed() -> None:
+    records = [{"id": 1, "name": "Starter"}, {"id": 2, "name": "Pro"}]
+    answer = "Starter is $29 [Product-1], Pro is $99 [Product-2], Ultra is $999 [Product-999]."
+    validated = _validate_citations(answer, records)
+    assert "[Product-1]" in validated
+    assert "[Product-2]" in validated
+    assert "[Product-999]" not in validated
+
+
+def test_validate_citations_preserves_newlines_on_stripped_citation() -> None:
+    records = [{"id": 3, "name": "Enterprise"}]
+    answer = "Line 1.\n[Product-99] Line 2."
+    validated = _validate_citations(answer, records)
+    assert validated == "Line 1.\nLine 2."
+
+
+def test_worker_node_prompt_contains_valid_citation_keys() -> None:
+    mock_mcp = MagicMock()
+    mock_mcp.execute_query_sync.return_value = [
+        {"id": 3, "name": "Enterprise", "price": 5000.0, "category": "Subscriptions"}
+    ]
+    fake_llm = FakeLLM(answer="Enterprise costs $5000 [Product-3].")
+    state = {
+        "query": "Enterprise price",
+        "plan": "db",
+        "sql": "SELECT id, name, description, price, category FROM products WHERE name LIKE '%enterprise%'",
+    }
+    result = worker_node(state, fake_llm, mock_mcp)
+
+    prompt_text = str(fake_llm.inputs[0])
+    assert "Product-3" in prompt_text
+    assert result["answer"] == "Enterprise costs $5000 [Product-3]."
+
+
+def test_worker_node_strips_fabricated_citation_in_answer() -> None:
+    mock_mcp = MagicMock()
+    mock_mcp.execute_query_sync.return_value = [
+        {"id": 3, "name": "Enterprise", "price": 5000.0, "category": "Subscriptions"}
+    ]
+    fake_llm = FakeLLM(answer="Enterprise costs $5000 [Product-99].")
+    state = {
+        "query": "Enterprise price",
+        "plan": "db",
+        "sql": "SELECT id, name, description, price, category FROM products WHERE name LIKE '%enterprise%'",
+    }
+    result = worker_node(state, fake_llm, mock_mcp)
+
+    assert "[Product-99]" not in result["answer"]
+    assert "costs $5000." in result["answer"]
+
+
+def test_multi_turn_citation_and_memory_synergy() -> None:
+    checkpointer = InMemorySaver()
+    mock_mcp = MagicMock()
+
+    def mcp_side_effect(sql: str) -> list[dict[str, Any]]:
+        if "enterprise" in sql.lower():
+            return [{"id": 3, "name": "Enterprise package", "price": 5000.0, "category": "Subscriptions"}]
+        elif "starter" in sql.lower():
+            return [{"id": 1, "name": "Starter package", "price": 29.0, "category": "Subscriptions"}]
+        return []
+
+    mock_mcp.execute_query_sync.side_effect = mcp_side_effect
+
+    fake_llm = FakeLLM(
+        answer=[
+            "The Enterprise package costs $5,000 [Product-3].",
+            "The Starter package costs $29 [Product-1], compared to the package discussed earlier.",
+        ]
+    )
+    graph = create_agent_graph(llm=fake_llm, mcp_client=mock_mcp, checkpointer=checkpointer)
+    agent = BasicAgent(graph=graph, mcp_client=mock_mcp, checkpointer=checkpointer)
+
+    thread_id = "test-synergy-thread-1"
+
+    # Turn 1: Enterprise query
+    ans_1, ev_1 = agent.query_with_evidence("What is the price of the Enterprise package?", thread_id=thread_id)
+    assert "[Product-3]" in ans_1
+    assert ev_1 == [{"id": 3, "name": "Enterprise package", "price": 5000.0, "category": "Subscriptions"}]
+
+    # Turn 2: Follow-up query referencing Starter
+    ans_2, ev_2 = agent.query_with_evidence("What is the price of the Starter package compared to earlier?", thread_id=thread_id)
+    assert "[Product-1]" in ans_2
+    assert ev_2 == [{"id": 1, "name": "Starter package", "price": 29.0, "category": "Subscriptions"}]
+
+    # Verify Turn 2 LLM prompt received Turn 1 conversation history in prior_messages
+    turn2_inputs = fake_llm.inputs[1]
+    turn2_text = "\n".join(str(getattr(m, "content", m)) for m in turn2_inputs)
+    assert "What is the price of the Enterprise package?" in turn2_text
+    assert "The Enterprise package costs $5,000 [Product-3]." in turn2_text
+    assert "Product-1" in turn2_text
+
