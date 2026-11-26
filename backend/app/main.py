@@ -2,10 +2,13 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 import inspect
 import logging
+import os
+from pathlib import Path as FilePath
+import sqlite3
 from typing import Any
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Path, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -20,6 +23,7 @@ from app.agent import (
     configure_default_checkpointer,
     get_agent,
 )
+from app.db_setup import DEFAULT_DB_PATH
 from app.persistence import (
     PersistenceError,
     PostgresPersistenceManager,
@@ -29,6 +33,8 @@ from app.schemas import QueryRequest, QueryResponse, ThreadHistoryResponse, Thre
 from app.streaming import sse_answer, sse_done, sse_error, sse_step, sse_trace
 
 logger = logging.getLogger(__name__)
+
+THREAD_ID_PATTERN = r"^[a-zA-Z0-9_\-]{1,64}$"
 
 
 @asynccontextmanager
@@ -55,9 +61,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 
+cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+cors_origins = [orig.strip() for orig in cors_origins_env.split(",") if orig.strip()]
+if not cors_origins:
+    cors_origins = ["http://localhost:5173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
@@ -79,6 +90,45 @@ def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health/deep")
+def deep_health_check() -> dict[str, Any]:
+    components: dict[str, str] = {}
+    is_healthy = True
+
+    # 1. Database accessibility check
+    env_db = os.getenv("SQLITE_DB_PATH")
+    db_path = FilePath(env_db).resolve() if env_db else DEFAULT_DB_PATH.resolve()
+    if not db_path.exists():
+        components["database"] = f"down: database file not found at {db_path}"
+        is_healthy = False
+    else:
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM products")
+                count = cursor.fetchone()[0]
+                components["database"] = f"ok ({count} products)"
+        except Exception as exc:
+            components["database"] = f"down: {type(exc).__name__}"
+            is_healthy = False
+
+    # 2. LLM Provider configuration check
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    components["llm_provider"] = "configured" if api_key else "not_configured"
+
+    # 3. Checkpointer check
+    pg_url = os.getenv("POSTGRES_URL") or os.getenv("DATABASE_URL")
+    components["checkpointer"] = "postgres" if pg_url else "memory_or_disabled"
+
+    status_str = "ok" if is_healthy else "degraded"
+    if not is_healthy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": status_str, "components": components},
+        )
+    return {"status": status_str, "components": components}
+
+
 @app.post("/query", response_model=QueryResponse, response_model_exclude_none=True)
 def query_agent(
     request: QueryRequest,
@@ -97,7 +147,7 @@ def query_agent(
                 request.query,
                 thread_id=active_thread_id,
             )
-            resolved_thread_id = getattr(agent, "last_thread_id", None) or active_thread_id
+            resolved_thread_id = active_thread_id
         else:
             answer, evidence = agent.query_with_evidence(request.query)
             resolved_thread_id = active_thread_id
@@ -160,7 +210,7 @@ def stream_agent(
 
                 elif event == "answer":
                     # Optionally emit LangSmith trace URL
-                    run_id = getattr(agent, "last_run_id", None)
+                    run_id = data.get("run_id") or getattr(agent, "last_run_id", None)
                     trace_frame = sse_trace(run_id)
                     if trace_frame:
                         yield trace_frame
@@ -169,7 +219,7 @@ def stream_agent(
                     yield sse_answer(
                         answer_text,
                         data.get("evidence"),
-                        data.get("thread_id"),
+                        data.get("thread_id") or active_thread_id,
                     )
 
                 elif event == "error":
@@ -184,7 +234,8 @@ def stream_agent(
                 yield sse_done()
 
         except Exception as exc:
-            yield sse_error(str(exc))
+            logger.exception("Streaming execution failed: %s", exc)
+            yield sse_error(str(exc) or f"Execution error ({type(exc).__name__})")
             if not done_emitted:
                 done_emitted = True
                 yield sse_done()
@@ -198,7 +249,11 @@ def stream_agent(
     response_model_exclude_none=True,
 )
 def get_thread_history(
-    thread_id: str,
+    thread_id: str = Path(
+        ...,
+        pattern=THREAD_ID_PATTERN,
+        description="Unique conversation thread ID (1-64 alphanumeric/underscore/hyphen)",
+    ),
     agent: BasicAgent = Depends(get_agent),
 ) -> ThreadHistoryResponse:
     state = agent.get_thread_state(thread_id)
