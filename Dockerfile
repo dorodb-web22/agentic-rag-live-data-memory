@@ -68,3 +68,30 @@ EXPOSE 80
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
     CMD wget -q -O /dev/null http://127.0.0.1/api/health || exit 1
+
+# ============================================================================
+# Stage 4 (Default): All-in-one Single-Origin Container for Railway / Render
+# Serves `/` (landing), `/app` (React SPA), and `/api/*` (FastAPI SSE) on $PORT
+# ============================================================================
+FROM backend AS all-in-one
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nginx gettext-base \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/www/html/app /etc/nginx/templates
+
+COPY landing/ /var/www/html/
+COPY --from=frontend-builder /build/frontend/dist/ /var/www/html/app/
+COPY deploy/nginx.railway.conf.template /etc/nginx/templates/default.conf.template
+COPY deploy/start-all-in-one.sh /usr/local/bin/start-all-in-one.sh
+RUN chmod +x /usr/local/bin/start-all-in-one.sh
+
+ENV PORT=8080
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:${PORT}/api/health || exit 1
+
+CMD ["/usr/local/bin/start-all-in-one.sh"]

@@ -62,3 +62,8 @@ def test_single_origin_deploy_and_ci_gate_configs_present() -> None:
     ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "deepeval-gate:" in ci_yml
     assert "evals.run_eval" in ci_yml
+
+    railway_json = (REPO_ROOT / "railway.json").read_text(encoding="utf-8")
+    assert '"dockerfilePath": "Dockerfile"' in railway_json
+    assert '"/api/health"' in railway_json
+    assert "FROM backend AS all-in-one" in dockerfile
