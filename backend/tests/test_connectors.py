@@ -413,3 +413,118 @@ def test_crypto_roundtrip_in_registry_flow() -> None:
     assert recovered["refresh_token"] == original["refresh_token"]
     assert recovered["expires_at"] == original["expires_at"]
     assert recovered["scope"] == original["scope"]
+
+
+# ── Google Calendar ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_connector_fetch_returns_events() -> None:
+    from app.integrations.google_calendar import GoogleCalendarConnector
+
+    integ = _make_db_integration("google_calendar")
+    tokens = {"access_token": "ya29.cal_test"}
+
+    events_resp = MagicMock()
+    events_resp.status_code = 200
+    events_resp.raise_for_status = MagicMock()
+    events_resp.json.return_value = {
+        "items": [
+            {
+                "id": "evt1234567890",
+                "summary": "Sprint Demo",
+                "start": {"dateTime": "2026-11-27T10:00:00Z"},
+                "end": {"dateTime": "2026-11-27T11:00:00Z"},
+                "location": "Google Meet",
+                "organizer": {"email": "lead@example.com"},
+                "attendees": [{"email": "alok@example.com"}],
+                "status": "confirmed",
+                "description": "Demo Sprint 3 live deployment",
+                "htmlLink": "https://calendar.google.com/event?eid=evt123",
+            }
+        ]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=events_resp)
+
+    connector = GoogleCalendarConnector(integration=integ, tokens=tokens)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch("What meetings do I have this week?")
+
+    assert len(results) == 1
+    assert results[0]["source"] == "google_calendar"
+    assert results[0]["citation_key"].startswith("GCal-")
+    assert results[0]["summary"] == "Sprint Demo"
+
+
+# ── Google Sheets ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_google_sheets_connector_auto_discovers_and_reads_rows() -> None:
+    from app.integrations.google_sheets import GoogleSheetsConnector
+
+    integ = _make_db_integration("google_sheets")
+    integ.config = {}
+    tokens = {"access_token": "ya29.sheets_test"}
+
+    drive_resp = MagicMock()
+    drive_resp.status_code = 200
+    drive_resp.raise_for_status = MagicMock()
+    drive_resp.json.return_value = {
+        "files": [
+            {
+                "id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+                "name": "Q4 Budget",
+                "webViewLink": "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+            }
+        ]
+    }
+
+    meta_resp = MagicMock()
+    meta_resp.status_code = 200
+    meta_resp.raise_for_status = MagicMock()
+    meta_resp.json.return_value = {
+        "properties": {"title": "Q4 Budget"},
+        "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        "sheets": [{"properties": {"title": "Summary"}}],
+    }
+
+    values_resp = MagicMock()
+    values_resp.status_code = 200
+    values_resp.json.return_value = {
+        "values": [
+            ["Category", "Amount"],
+            ["Cloud", "$500"],
+            ["API", "$120"],
+        ]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=[drive_resp, meta_resp, values_resp])
+
+    connector = GoogleSheetsConnector(integration=integ, tokens=tokens)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch("summarize my Q4 budget spreadsheet")
+
+    assert len(results) == 1
+    assert results[0]["source"] == "google_sheets"
+    assert results[0]["citation_key"].startswith("GSheet-")
+    assert results[0]["spreadsheet_title"] == "Q4 Budget"
+    assert results[0]["rows"][0] == {"Category": "Cloud", "Amount": "$500"}
+
+
+def test_google_sheets_extracts_safe_url_ids_only() -> None:
+    from app.integrations.google_sheets import _extract_spreadsheet_ids_from_query, _is_safe_spreadsheet_id
+
+    assert not _is_safe_spreadsheet_id("../etc/passwd")
+    assert not _is_safe_spreadsheet_id("short")
+    ids = _extract_spreadsheet_ids_from_query(
+        "check https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit#gid=0"
+    )
+    assert ids == ["1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"]

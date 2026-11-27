@@ -34,34 +34,7 @@ def register(cls: type["BaseConnector"]) -> type["BaseConnector"]:
 
 # ── Coming-soon stubs (not in REGISTRY — no fetch(), no OAuth) ───────────────
 
-COMING_SOON_STUBS: list[dict[str, Any]] = [
-    {
-        "provider": "google_sheets",
-        "display_name": "Google Sheets",
-        "category": "spreadsheets",
-        "description": "Live spreadsheets & tabs (Incremental Google OAuth)",
-        "auth_type": "oauth",
-        "available": False,
-        "status": "coming_soon",
-        "scope_summary": None,
-        "config": {},
-        "suggested_prompts": [],
-        "connected_at": None,
-    },
-    {
-        "provider": "google_calendar",
-        "display_name": "Google Calendar",
-        "category": "calendar",
-        "description": "Events, schedules & availability (Incremental Google OAuth)",
-        "auth_type": "oauth",
-        "available": False,
-        "status": "coming_soon",
-        "scope_summary": None,
-        "config": {},
-        "suggested_prompts": [],
-        "connected_at": None,
-    },
-]
+COMING_SOON_STUBS: list[dict[str, Any]] = []
 
 # Canonical display order for GET /api/integrations
 _PROVIDER_ORDER = ["github", "gmail", "notion", "sqlite", "google_sheets", "google_calendar"]
@@ -178,5 +151,7 @@ async def get_catalog_for_user(
 # (keep at bottom to avoid circular imports)
 import app.integrations.github  # noqa: E402, F401
 import app.integrations.gmail  # noqa: E402, F401
+import app.integrations.google_calendar  # noqa: E402, F401
+import app.integrations.google_sheets  # noqa: E402, F401
 import app.integrations.notion  # noqa: E402, F401
 import app.integrations.sqlite_upload  # noqa: E402, F401
