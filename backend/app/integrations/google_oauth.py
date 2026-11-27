@@ -31,6 +31,7 @@ GOOGLE_SCOPE_MAP: dict[str, list[str]] = {
     ],
     "google_sheets": [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
     ],
     "google_calendar": [
         "https://www.googleapis.com/auth/calendar.readonly",

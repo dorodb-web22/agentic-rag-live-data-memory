@@ -317,7 +317,8 @@ def test_new_user_c_starts_with_empty_workspace_and_zero_bound_tools(multitenant
         assert by_prov["notion"]["status"] == "disconnected"
         assert by_prov["sqlite"]["status"] == "disconnected"
         assert by_prov["sqlite"]["config"] == {}
-        assert by_prov["google_sheets"]["status"] == "coming_soon"
+        assert by_prov["google_sheets"]["status"] == "disconnected"
+        assert by_prov["google_calendar"]["status"] == "disconnected"
 
         # Streaming query runs with 0 tools and strips fabricated citations
         stream_resp = client.post(
