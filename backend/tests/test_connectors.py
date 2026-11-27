@@ -94,6 +94,163 @@ async def test_github_connector_returns_empty_when_disconnected() -> None:
     assert results == []
 
 
+@pytest.mark.asyncio
+async def test_github_connector_extracts_repo_from_url_and_fetches_commits() -> None:
+    from app.integrations.github import GitHubConnector
+
+    integ = _make_db_integration("github")
+    integ.config = {}  # no repos configured!
+    tokens = {"access_token": "ghs_test_token"}
+
+    commits_resp = MagicMock()
+    commits_resp.status_code = 200
+    commits_resp.json.return_value = [
+        {
+            "sha": "15e0bc42ef964d75",
+            "html_url": "https://github.com/dorodb-web22/agentic-rag-live-data-memory/commit/15e0bc4",
+            "author": {"login": "cannonerd007"},
+            "commit": {
+                "message": "chore(deploy): add Railway single-origin Docker stage",
+                "author": {"name": "Alok", "date": "2026-11-26T18:00:00Z"},
+            },
+        }
+    ]
+    commits_resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=commits_resp)
+
+    connector = GitHubConnector(integration=integ, tokens=tokens)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch(
+            "how many recent commits in https://github.com/dorodb-web22/agentic-rag-live-data-memory.git"
+        )
+
+    assert len(results) == 1
+    assert results[0]["citation_key"] == "GitHub-15e0bc4"
+    assert results[0]["repo"] == "dorodb-web22/agentic-rag-live-data-memory"
+    assert results[0]["state"] == "committed"
+
+
+@pytest.mark.asyncio
+async def test_github_connector_auto_discovers_repos_when_config_empty() -> None:
+    from app.integrations.github import GitHubConnector
+
+    integ = _make_db_integration("github")
+    integ.config = {}  # empty repos config -> should call /user/repos
+    tokens = {"access_token": "ghs_test_token"}
+
+    repos_resp = MagicMock()
+    repos_resp.status_code = 200
+    repos_resp.json.return_value = [{"full_name": "dorodb-web22/agentic-rag-live-data-memory"}]
+    repos_resp.raise_for_status = MagicMock()
+
+    pulls_resp = MagicMock()
+    pulls_resp.status_code = 200
+    pulls_resp.json.return_value = [
+        {
+            "number": 40,
+            "title": "chore(deploy): add Railway single-origin Docker target",
+            "state": "closed",
+            "merged_at": "2026-11-26T18:10:00Z",
+            "html_url": "https://github.com/dorodb-web22/agentic-rag-live-data-memory/pull/40",
+            "user": {"login": "cannonerd007"},
+            "body": "Adds all-in-one Docker stage.",
+        }
+    ]
+    pulls_resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=[repos_resp, pulls_resp])
+
+    connector = GitHubConnector(integration=integ, tokens=tokens)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch("is there any new PR on our project?")
+
+    assert len(results) == 1
+    assert results[0]["citation_key"] == "GitHub-40"
+    assert results[0]["state"] == "merged"
+
+
+def test_github_rejects_dot_segment_repo_slugs() -> None:
+    """`../..` must never be accepted: httpx would normalise it to `/user/...`."""
+    from app.integrations.github import _extract_repos_from_query, _is_safe_repo
+
+    assert not _is_safe_repo("../..")
+    assert not _is_safe_repo("./.")
+    assert not _is_safe_repo("owner/..")
+    assert _is_safe_repo("dorodb-web22/agentic-rag-live-data-memory")
+    assert _is_safe_repo("owner/repo.js")
+    assert _extract_repos_from_query("see github.com/../.. now") == []
+
+
+def test_github_keyword_detection_has_no_false_positives() -> None:
+    from app.integrations.github import (
+        _COMMIT_KEYWORDS,
+        _WANTS_ALL_PR_STATES,
+        _has_keyword,
+    )
+
+    assert not _has_keyword("show my chat history", _COMMIT_KEYWORDS)
+    assert _has_keyword("how many commits are there", _COMMIT_KEYWORDS)
+    # "all" must match as a word, not inside "small"
+    assert not _has_keyword("any small prs", _WANTS_ALL_PR_STATES)
+    assert _has_keyword("show all prs", _WANTS_ALL_PR_STATES)
+
+
+def test_github_citation_keys_are_unique_across_repos() -> None:
+    from app.integrations.github import _dedupe_citation_keys
+
+    records = [
+        {"citation_key": "GitHub-12", "repo": "acme/alpha", "number": 12},
+        {"citation_key": "GitHub-12", "repo": "acme/beta", "number": 12},
+        {"citation_key": "GitHub-7", "repo": "acme/beta", "number": 7},
+    ]
+    _dedupe_citation_keys(records)
+    keys = [r["citation_key"] for r in records]
+    assert keys == ["GitHub-12", "GitHub-beta-12", "GitHub-7"]
+    assert len(set(keys)) == len(keys)
+
+
+@pytest.mark.asyncio
+async def test_github_issues_exclude_pull_requests() -> None:
+    from app.integrations.github import GitHubConnector
+
+    integ = _make_db_integration("github")
+    integ.config = {"repos": ["acme/alpha"]}
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = [
+        {"number": 1, "title": "Real issue", "state": "open", "html_url": "u1", "user": {"login": "a"}, "body": ""},
+        {
+            "number": 2,
+            "title": "A PR listed by the issues API",
+            "state": "open",
+            "html_url": "u2",
+            "user": {"login": "b"},
+            "body": "",
+            "pull_request": {"url": "https://api.github.com/repos/acme/alpha/pulls/2"},
+        },
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=resp)
+
+    connector = GitHubConnector(integration=integ, tokens={"access_token": "t"})
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results = await connector.fetch("which issues are open?")
+
+    assert [r["number"] for r in results] == [1]
+
+
 # ── Gmail ─────────────────────────────────────────────────────────────────────
 
 

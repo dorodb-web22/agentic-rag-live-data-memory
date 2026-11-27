@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector image: Alembic migration 002 runs `CREATE EXTENSION vector`, which the
+    # plain postgres:16-alpine image does not ship.
+    image: pgvector/pgvector:pg16
     container_name: g135-agentic-rag-postgres
     restart: unless-stopped
     environment:
